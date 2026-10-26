@@ -256,7 +256,7 @@ const handleLogout = () => {
 const handleNavigate = (type) => {
   const routes = {
     'ai': '/ai-generation/requirement-analysis',
-    'api': '/api-testing/dashboard',
+    'api': '/api-testing/design',
     'ui': '/ui-automation/dashboard',
     'app': '/app-automation/dashboard',
     'ai-intelligent': '/ai-intelligent-mode/testing',

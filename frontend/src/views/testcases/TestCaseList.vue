@@ -14,7 +14,7 @@
         <button class="act-btn" @click="downloadImportTemplate">📋 模板</button>
         <button class="act-btn" @click="openImportDialog">📤 {{ $t('testcase.importCases') }}</button>
         <button class="act-btn" @click="goToImportRecords">📂 记录</button>
-        <button class="act-btn primary" @click="$router.push('/ai-generation/testcases/create')">＋ {{ $t('testcase.newCase') }}</button>
+        <button class="act-btn primary" @click="goToCreate">＋ {{ $t('testcase.newCase') }}</button>
       </div>
     </div>
 
@@ -49,6 +49,13 @@
             <el-option :label="$t('testcase.medium')" value="medium" />
             <el-option :label="$t('testcase.high')" value="high" />
             <el-option :label="$t('testcase.critical')" value="critical" />
+          </el-select>
+        </div>
+        <div class="filter-group">
+          <label class="filter-label">执行状态</label>
+          <el-select v-model="executionStatusFilter" placeholder="执行状态" clearable @change="handleFilter" class="filter-select short">
+            <el-option label="通过" value="passed" />
+            <el-option label="不通过" value="failed" />
           </el-select>
         </div>
         <div class="filter-group search-group">
@@ -179,6 +186,7 @@ const total = ref(0)
 const searchText = ref('')
 const projectFilter = ref('')
 const priorityFilter = ref('')
+const executionStatusFilter = ref('')
 const versionFilter = ref('')
 const moduleFilter = ref('')
 const filterModules = ref([])
@@ -208,6 +216,9 @@ const activeFilters = computed(() => {
   if (priorityFilter.value) {
     f.push({ key: 'priority', label: '优先级: ' + getPriorityText(priorityFilter.value) })
   }
+  if (executionStatusFilter.value) {
+    f.push({ key: 'execution_status', label: '执行: ' + (executionStatusFilter.value === 'passed' ? '通过' : '不通过') })
+  }
   if (searchText.value) {
     f.push({ key: 'search', label: '搜索: ' + searchText.value })
   }
@@ -220,6 +231,7 @@ const removeFilter = (key) => {
     case 'version': versionFilter.value = ''; handleVersionFilterChange(); break
     case 'module': moduleFilter.value = ''; handleFilter(); break
     case 'priority': priorityFilter.value = ''; handleFilter(); break
+    case 'execution_status': executionStatusFilter.value = ''; handleFilter(); break
     case 'search': searchText.value = ''; handleSearch(); break
   }
 }
@@ -229,6 +241,7 @@ const clearAllFilters = () => {
   versionFilter.value = ''
   moduleFilter.value = ''
   priorityFilter.value = ''
+  executionStatusFilter.value = ''
   searchText.value = ''
   filterModules.value = []
   currentPage.value = 1
@@ -242,6 +255,7 @@ const fetchTestCases = async () => {
     if (searchText.value) params.search = searchText.value
     if (projectFilter.value) params.project = projectFilter.value
     if (priorityFilter.value) params.priority = priorityFilter.value
+    if (executionStatusFilter.value) params.execution_status = executionStatusFilter.value
     if (versionFilter.value) params.versions = versionFilter.value
     if (moduleFilter.value) params.function_module = moduleFilter.value
     const response = await api.get('/testcases/', { params })
@@ -294,9 +308,22 @@ const goToTestCase = (id) => {
   if (versionFilter.value) query.versions = versionFilter.value
   if (moduleFilter.value) query.function_module = moduleFilter.value
   if (priorityFilter.value) query.priority = priorityFilter.value
+  if (executionStatusFilter.value) query.execution_status = executionStatusFilter.value
   if (searchText.value) query.search = searchText.value
   query.page = currentPage.value
   router.push({ path: `/ai-generation/testcases/${id}`, query })
+}
+
+const goToCreate = () => {
+  const query = {}
+  if (projectFilter.value) query.project = projectFilter.value
+  if (versionFilter.value) query.versions = versionFilter.value
+  if (moduleFilter.value) query.function_module = moduleFilter.value
+  if (priorityFilter.value) query.priority = priorityFilter.value
+  if (executionStatusFilter.value) query.execution_status = executionStatusFilter.value
+  if (searchText.value) query.search = searchText.value
+  query.page = currentPage.value
+  router.push({ path: '/ai-generation/testcases/create', query })
 }
 
 const editTestCase = (tc) => {
@@ -305,6 +332,7 @@ const editTestCase = (tc) => {
   if (versionFilter.value) query.versions = versionFilter.value
   if (moduleFilter.value) query.function_module = moduleFilter.value
   if (priorityFilter.value) query.priority = priorityFilter.value
+  if (executionStatusFilter.value) query.execution_status = executionStatusFilter.value
   if (searchText.value) query.search = searchText.value
   query.page = currentPage.value
   router.push({ path: `/ai-generation/testcases/${tc.id}/edit`, query })
@@ -369,6 +397,7 @@ const exportToExcel = async () => {
         if (searchText.value) params.search = searchText.value
         if (projectFilter.value) params.project = projectFilter.value
         if (priorityFilter.value) params.priority = priorityFilter.value
+        if (executionStatusFilter.value) params.execution_status = executionStatusFilter.value
         if (versionFilter.value) params.versions = versionFilter.value
         const res = await api.get('/testcases/', { params })
         const results = res.data.results || []
@@ -414,16 +443,33 @@ const fetchProjects = async () => {
   try { const r = await api.get('/projects/'); projects.value = r.data.results || r.data || [] }
   catch (e) { ElMessage.error(t('testcase.fetchProjectsFailed')) }
 }
-const hasAnyFilter = () => projectFilter.value || versionFilter.value || moduleFilter.value || priorityFilter.value || searchText.value
+const hasAnyFilter = () => projectFilter.value || versionFilter.value || moduleFilter.value || priorityFilter.value || executionStatusFilter.value || searchText.value
 
-onMounted(() => {
-  fetchProjects(); fetchVersions()
-  if (route.query.project) projectFilter.value = Number(route.query.project)
-  if (route.query.versions) { versionFilter.value = Number(route.query.versions); fetchModulesForFilter() }
+onMounted(async () => {
+  await fetchProjects()
+
+  // 先恢复项目筛选（级联起点），再加载版本
+  if (route.query.project) {
+    projectFilter.value = Number(route.query.project)
+    await fetchVersions()
+  } else {
+    await fetchVersions()
+  }
+
+  // 恢复版本筛选，加载模块
+  if (route.query.versions) {
+    versionFilter.value = Number(route.query.versions)
+    if (versionFilter.value) await fetchModulesForFilter()
+  }
+
+  // 恢复其余筛选
   if (route.query.function_module) moduleFilter.value = Number(route.query.function_module)
   if (route.query.priority) priorityFilter.value = route.query.priority
+  if (route.query.execution_status) executionStatusFilter.value = route.query.execution_status
   if (route.query.search) searchText.value = route.query.search
   if (route.query.page) currentPage.value = Number(route.query.page)
+
+  // 有筛选项时加载数据
   if (hasAnyFilter()) fetchTestCases()
 })
 </script>

@@ -746,7 +746,14 @@ export default {
       try {
         const response = await api.post(`/requirement-analysis/testcase-generation/${task.task_id}/retry/`)
         ElMessage.success(response.data.message || '重试已启动')
-        this.loadTasks()
+        // 跳转到AI用例生成页查看进度
+        this.$router.push({ name: 'RequirementAnalysis' })
+        this.$nextTick(() => {
+          // 触发查看该任务的生成进度
+          window.dispatchEvent(new CustomEvent('testhub:watch-task', {
+            detail: { taskId: task.task_id }
+          }))
+        })
       } catch (error) {
         console.error('重试失败:', error)
         ElMessage.error('重试失败: ' + (error.response?.data?.error || error.message))

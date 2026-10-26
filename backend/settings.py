@@ -69,6 +69,7 @@ LOCAL_APPS = [
     'apps.app_automation.apps.AppAutomationConfig',  # APP自动化测试
     'apps.core',
     'apps.data_factory',
+    'apps.knowledge_base',
 ]
 
 if ANALYTICS_ENABLED or REGISTRATION_STATS_ENABLED:
@@ -301,6 +302,19 @@ CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
+# 定时任务：每天凌晨 3:30 清理过期的采集快照（默认保留 15 天）
+try:
+    from celery.schedules import crontab
+    CELERY_BEAT_SCHEDULE = {
+        'cleanup-knowledge-snapshots': {
+            'task': 'knowledge_base.cleanup_snapshots',
+            'schedule': crontab(hour=3, minute=30),
+            'kwargs': {'days': 15},
+        },
+    }
+except Exception:  # celery 未安装时不影响启动
+    CELERY_BEAT_SCHEDULE = {}
+
 # Channels Configuration
 CHANNEL_LAYERS = {
     'default': {
@@ -325,6 +339,11 @@ CACHES = {
         'TIMEOUT': 300,  # 默认缓存超时5分钟
     }
 }
+
+# 需求知识库注入模式：
+#   precise（默认）= AI 语义匹配，只注入与当前需求相关的功能点知识
+#   full          = 全量注入项目下所有已确认知识节点
+KNOWLEDGE_INJECTION_MODE = config('KNOWLEDGE_INJECTION_MODE', default='precise')
 
 # Email Configuration
 EMAIL_BACKEND = 'apps.api_testing.custom_email_backend.CustomEmailBackend'
@@ -429,7 +448,7 @@ SIMPLEUI_LOGIN_PARTICLES = True
 # # 自定义首页图标 首页图标,支持element-ui和fontawesome的图标，参考https://fontawesome.com/icons图标
 # SIMPLEUI_HOME_ICON = 'fa fa-gauge'
 # 设置simpleui 点击首页图标跳转的地址
-SIMPLEUI_INDEX = 'http://localhost:3000'
+SIMPLEUI_INDEX = 'http://192.168.8.87:3000'
 # 自定义后台的Logo
 SIMPLEUI_LOGO = 'https://static.djangoproject.com/img/favicon.6dbf28c0650e.ico'
 # 是否显示首页信息
@@ -490,3 +509,18 @@ SIMPLEUI_ICON = {
 
 # 开发环境，暂时禁用迁移历史检查
 # SILENCED_SYSTEM_CHECKS = ['django.db.migrations.InconsistentMigrationHistory']
+
+# ===== 测试平台出站 HTTP 跳过 SSL 证书校验 =====
+# 内部测试服务器（如 closer-test.51wnl-cq.com）多为自签名证书，certifi 不信任会导致请求失败。
+# 这里仅对 requests 库生效；AI/YApi 调用走 httpx，不受影响。
+import requests as _requests
+_orig_request = _requests.request
+
+
+def _insecure_request(*args, **kwargs):
+    kwargs.setdefault('verify', False)
+    return _orig_request(*args, **kwargs)
+
+
+_requests.request = _insecure_request
+

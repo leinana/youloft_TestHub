@@ -2,6 +2,9 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'path'
 
+// Docker 环境下通过 BACKEND_PROXY_TARGET 环境变量指定后端地址
+const backendTarget = process.env.BACKEND_PROXY_TARGET || 'http://192.168.8.87:8000'
+
 export default defineConfig({
   envDir: resolve(__dirname, '..'),
   plugins: [vue()],
@@ -39,31 +42,31 @@ export default defineConfig({
     },
     proxy: {
       '^/api/': {
-        target: 'http://127.0.0.1:8000',
+        target: backendTarget,
         changeOrigin: true,
         secure: false,
         timeout: 600000,  // OCR/大文件上传需要10分钟
       },
       '^/media/': {
-        target: 'http://127.0.0.1:8000',
+        target: backendTarget,
         changeOrigin: true,
         secure: false,
         timeout: 600000,
       },
       '^/app-automation-templates/': {
-        target: 'http://127.0.0.1:8000',
+        target: backendTarget,
         changeOrigin: true,
         secure: false,
         timeout: 600000,
       },
       '^/app-automation-reports/': {
-        target: 'http://127.0.0.1:8000',
+        target: backendTarget,
         changeOrigin: true,
         secure: false,
         timeout: 600000,
       },
       '^/ws/': {
-        target: 'ws://127.0.0.1:8000',
+        target: backendTarget.replace('http://', 'ws://'),
         ws: true,
         changeOrigin: true,
         configure: (proxy) => {

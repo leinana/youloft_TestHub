@@ -1558,9 +1558,9 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
                 try:
                     from apps.projects.models import Project
                     project = Project.objects.get(id=int(project_id))
-                    if project.knowledge_base:
-                        knowledge_base = project.knowledge_base
-                        logger.info(f"[extract] 已加载项目知识背景 {len(knowledge_base)} 字符")
+                    from apps.knowledge_base.knowledge_context import merge_with_structured_knowledge
+                    knowledge_base = merge_with_structured_knowledge(project)
+                    logger.info(f"[extract] 已加载项目知识背景 {len(knowledge_base)} 字符")
                 except (Project.DoesNotExist, ValueError, TypeError):
                     pass
 
@@ -1688,18 +1688,16 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
         2. 多模态模式：POST multipart/form-data (file + title)
         """
         try:
-            # 加载项目知识背景（如果有 project_id）
+            # 解析项目（知识背景等拿到需求文本后，再做 AI 精准匹配）
             knowledge_base = ""
+            project = None
             project_id = request.data.get('project_id') or request.data.get('project')
             if project_id:
                 try:
                     from apps.projects.models import Project
                     project = Project.objects.get(id=int(project_id))
-                    if project.knowledge_base:
-                        knowledge_base = project.knowledge_base
-                        logger.info(f"[clarify] 已加载项目知识背景 {len(knowledge_base)} 字符")
                 except (Project.DoesNotExist, ValueError, TypeError):
-                    pass
+                    project = None
 
             files = request.FILES.getlist('files') or ([request.FILES.get('file')] if request.FILES.get('file') else [])
 
@@ -1773,6 +1771,14 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
 
                 requirement_text = request.data.get('description', '').strip() or '\n'.join(text_parts)
 
+                # 精准知识注入：拿到需求文本后再做 AI 语义匹配，回填任务快照
+                if project:
+                    from apps.knowledge_base.knowledge_context import merge_with_structured_knowledge
+                    knowledge_base = merge_with_structured_knowledge(project, requirement_text)
+                    task.knowledge_base = knowledge_base
+                    task.save(update_fields=['knowledge_base'])
+                    logger.info(f"[clarify] 已获取项目「{project.name}」知识背景 {len(knowledge_base)} 字符")
+
                 # --- 共享：获取配置、调用AI ---
                 clarifier_config = AIModelConfig.objects.filter(
                     role='clarifier', is_active=True, supports_vision=True
@@ -1844,6 +1850,14 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
                         {'error': '需求文本过短，请提供至少20个字符的需求描述'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
+
+                # 精准知识注入：拿到需求文本后再做 AI 语义匹配，回填任务快照
+                if project:
+                    from apps.knowledge_base.knowledge_context import merge_with_structured_knowledge
+                    knowledge_base = merge_with_structured_knowledge(project, requirement_text)
+                    task.knowledge_base = knowledge_base
+                    task.save(update_fields=['knowledge_base'])
+                    logger.info(f"[clarify] 已获取项目「{project.name}」知识背景 {len(knowledge_base)} 字符")
 
                 # 获取澄清模型配置（优先用支持视觉的，文本模式也可以使用普通模型）
                 clarifier_config = AIModelConfig.objects.filter(
@@ -2059,13 +2073,33 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
             task.progress = 10
             task.save(update_fields=['status', 'pipeline_stage', 'progress'])
 
-            logger.info(f"[pipeline] task={task.task_id} 开始生成")
+            logger.info(f"[pipeline] task={task.task_id} 开始生成 multimodal={task.multimodal_mode}")
+
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                result = loop.run_until_complete(
-                    AIModelService.generate_test_cases_stream(task)
-                )
+                # 多模态任务：需确保用视觉模型
+                if task.multimodal_mode and task.page_images_base64:
+                    config = task.writer_model_config
+                    if not config or not config.supports_vision:
+                        fallback = AIModelService.get_active_writer(needs_vision=True)
+                        if fallback:
+                            logger.info(
+                                f"[pipeline] 多模态任务切换视觉模型: "
+                                f"{config.model_name if config else 'None'} → {fallback.model_name}"
+                            )
+                            task.writer_model_config = fallback
+                            task.save(update_fields=['writer_model_config'])
+                        else:
+                            raise ValueError('多模态任务需要视觉模型，但未找到可用的视觉模型配置')
+
+                    result = loop.run_until_complete(
+                        AIModelService.generate_test_cases_multimodal(task)
+                    )
+                else:
+                    result = loop.run_until_complete(
+                        AIModelService.generate_test_cases_stream(task)
+                    )
                 task.generated_test_cases = result
                 task.progress = 50
                 task.pipeline_stage = 'generated'
@@ -2321,9 +2355,9 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
                 try:
                     from apps.projects.models import Project
                     project = Project.objects.get(id=task_data['project'])
-                    if project.knowledge_base:
-                        task_data['knowledge_base'] = project.knowledge_base
-                        logger.info(f"[generate_multimodal] 已获取项目「{project.name}」知识背景 {len(project.knowledge_base)} 字符")
+                    from apps.knowledge_base.knowledge_context import merge_with_structured_knowledge
+                    task_data['knowledge_base'] = merge_with_structured_knowledge(project, text)
+                    logger.info(f"[generate_multimodal] 已获取项目「{project.name}」知识背景 {len(task_data['knowledge_base'])} 字符")
                 except Project.DoesNotExist:
                     pass
 
@@ -2707,9 +2741,9 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
                 try:
                     from apps.projects.models import Project
                     project = Project.objects.get(id=validated_data['project'])
-                    if project.knowledge_base:
-                        task_data['knowledge_base'] = project.knowledge_base
-                        logger.info(f"[generate] 已获取项目「{project.name}」知识背景 {len(project.knowledge_base)} 字符")
+                    from apps.knowledge_base.knowledge_context import merge_with_structured_knowledge
+                    task_data['knowledge_base'] = merge_with_structured_knowledge(project, validated_data.get('requirement_text', ''))
+                    logger.info(f"[generate] 已获取项目「{project.name}」知识背景 {len(task_data['knowledge_base'])} 字符")
                 except Project.DoesNotExist:
                     pass
 
@@ -3280,7 +3314,7 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
                     return origin
 
                 # 兼容未配置时的本地开发默认
-                local_defaults = ['http://localhost:3000', 'http://127.0.0.1:3000']
+                local_defaults = ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://192.168.8.87:3000']
                 if origin in local_defaults:
                     return origin
 
@@ -3289,7 +3323,7 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
                     return allowed_origins[0]
 
                 # 最后兜底：返回请求 origin（若存在）
-                return origin or 'http://localhost:3000'
+                return origin or 'http://192.168.8.87:3000'
 
             cors_origin = get_allowed_origin(request_origin)
 
@@ -3532,14 +3566,14 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
                 if origin in allowed_origins:
                     return origin
 
-                local_defaults = ['http://localhost:3000', 'http://127.0.0.1:3000']
+                local_defaults = ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://192.168.8.87:3000']
                 if origin in local_defaults:
                     return origin
 
                 if allowed_origins:
                     return allowed_origins[0]
 
-                return origin or 'http://localhost:3000'
+                return origin or 'http://192.168.8.87:3000'
 
             cors_origin = get_allowed_origin(request_origin)
             response = HttpResponse(
@@ -4188,15 +4222,30 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
                 if len(cells) > 1:
                     table_data.append(cells)
 
-        if len(table_data) < 2:
+        if len(table_data) < 1:
             return []
 
-        # 解析表头和数据
-        headers = [h.lower() for h in table_data[0]]
-        logger.debug(f"表格标题: {headers}")
+        # 智能检测第一行是表头还是数据
+        first_row_lower = [h.lower() for h in table_data[0]]
+        header_keywords = ['用例id', '编号', 'id', '测试目标', '测试场景', '场景', '标题',
+                          '前置条件', '测试步骤', '操作步骤', '步骤', '预期结果', '优先级', '测试类型']
+        is_header = any(
+            any(kw in cell for kw in header_keywords)
+            for cell in first_row_lower
+        )
 
-        for row in table_data[1:]:
-            if len(row) < len(headers):
+        if is_header:
+            headers = first_row_lower
+            data_start = 1
+        else:
+            # 无表头：使用位置映射
+            headers = ['用例id', '测试目标', '前置条件', '操作步骤', '预期结果', '优先级', '测试类型', '关联需求']
+            data_start = 0
+
+        logger.debug(f"表格标题: {headers}, is_header={is_header}, rows={len(table_data)}")
+
+        for row in table_data[data_start:]:
+            if len(row) < 2:
                 continue
 
             test_case = {}
@@ -4216,7 +4265,7 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
                 elif any(keyword in header for keyword in ['优先级', 'priority']):
                     test_case['priority'] = value
 
-            if test_case.get('scenario') or test_case.get('steps'):
+            if test_case.get('scenario') or test_case.get('steps') or test_case.get('caseId'):
                 test_cases.append(test_case)
                 logger.debug(f"解析出表格测试用例: {test_case}")
 

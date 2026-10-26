@@ -422,6 +422,24 @@
           <h2>{{ $t('requirementAnalysis.clarificationTitle') }}</h2>
           <p class="clarification-subtitle">{{ $t('requirementAnalysis.clarificationSubtitle') }}</p>
 
+          <!-- 知识库覆盖提示：告诉用户本次需求在知识库里是否已有支撑 -->
+          <div v-if="knowledgeCoverage && knowledgeCoverage.ok" class="kb-coverage">
+            <div class="kb-coverage-title">
+              知识库覆盖：命中 {{ knowledgeCoverage.matched_count }} 个功能点
+            </div>
+            <div v-if="knowledgeCoverage.without_doc.length" class="kb-coverage-row warn">
+              ⚠️ 还没有需求文档：{{ knowledgeCoverage.without_doc.map(x => x.name).join('、') }}
+              <span class="kb-coverage-tip">先去知识库补上，生成用例会更准</span>
+            </div>
+            <div v-if="knowledgeCoverage.with_pending.length" class="kb-coverage-row info">
+              ℹ️ 有待确认的知识库变更：{{ knowledgeCoverage.with_pending.map(x => x.name + '(' + x.pending_changes + ')').join('、') }}
+            </div>
+            <div
+              v-if="!knowledgeCoverage.without_doc.length && !knowledgeCoverage.with_pending.length"
+              class="kb-coverage-row ok"
+            >✅ 知识库已覆盖，没有待确认的变更</div>
+          </div>
+
           <div v-if="isClarifying" class="clarifying-loading">
             <span class="loading-spinner">⏳</span>
             <span>{{ $t('requirementAnalysis.clarifying') }}</span>
@@ -678,6 +696,7 @@ export default {
 
       // 需求澄清
       showClarificationPanel: false,  // 是否显示澄清面板
+      knowledgeCoverage: null,  // 知识库覆盖检查结果
       isClarifying: false,  // 是否正在执行澄清分析
       clarificationQuestions: [],  // AI返回的澄清问题 [{id, question}]
       clarificationAnswers: {},  // 用户对每个问题的回答 {questionId: answerText}
@@ -1131,6 +1150,11 @@ export default {
         } else {
           ElMessage.success(`AI发现 ${questions.length} 个需要确认的问题`)
         }
+
+        // 顺便检查知识库覆盖情况（不阻塞澄清结果）
+        if (projectId) {
+          this.checkKnowledgeCoverage(requirementText, projectId)
+        }
       } catch (error) {
         console.error('需求澄清失败:', error)
         const errorMsg = error.response?.data?.error || error.message
@@ -1143,6 +1167,20 @@ export default {
         }]
       } finally {
         this.isClarifying = false
+      }
+    },
+
+    async checkKnowledgeCoverage(requirementText, projectId) {
+      this.knowledgeCoverage = null
+      try {
+        const r = await api.post('/knowledge/coverage/', {
+          project: projectId,
+          text: requirementText,
+        }, { timeout: 180000 })
+        this.knowledgeCoverage = r.data
+      } catch (e) {
+        console.warn('知识库覆盖检查失败:', e.message)
+        this.knowledgeCoverage = null
       }
     },
 
@@ -1239,7 +1277,10 @@ export default {
         )
       }
 
-      this.pendingGeneration = null
+      // 生成成功启动后才清除上下文（失败时保留，让用户可以重试）
+      if (this.isGenerating) {
+        this.pendingGeneration = null
+      }
     },
 
     async skipClarification() {
@@ -1724,6 +1765,12 @@ export default {
         clearInterval(this.pollInterval)
         this.pollInterval = null
       }
+      // 如果有澄清问题，回到澄清面板（保留用户已输入的回答）
+      if (this.clarificationQuestions.length > 0) {
+        this.showClarificationPanel = true
+        this.showResults = false
+        ElMessage.warning(this.$t('requirementAnalysis.generateFailedReturnClarify'))
+      }
     },
 
     startPolling() {
@@ -1782,6 +1829,11 @@ export default {
             this.pollInterval = null
 
             ElMessage.error(this.$t('requirementAnalysis.generateFailed') + ': ' + (task.error_message || this.$t('requirementAnalysis.unknownError')))
+            // 回到澄清面板，保留用户已输入的回答
+            if (this.clarificationQuestions.length > 0) {
+              this.showClarificationPanel = true
+              this.showResults = false
+            }
             return
           }
 
@@ -1797,8 +1849,17 @@ export default {
         clearInterval(this.pollInterval)
         this.pollInterval = null
       }
+      if (this.eventSource) {
+        this.eventSource.close()
+        this.eventSource = null
+      }
       this.isGenerating = false
       this.currentTaskId = null
+      // 如果有澄清问题，回到澄清面板让用户可以重新生成
+      if (this.clarificationQuestions.length > 0) {
+        this.showClarificationPanel = true
+        this.showResults = false
+      }
       ElMessage.info(this.$t('requirementAnalysis.generationCancelled'))
     },
 
@@ -3607,4 +3668,13 @@ export default {
   color: #856404;
   line-height: 1.5;
 }
+
+/* 知识库覆盖提示 */
+.kb-coverage { margin: 12px 0 16px; padding: 12px 14px; background: #f5f9ff; border: 1px solid #dcebfd; border-radius: 8px; font-size: 13px; line-height: 1.9; }
+.kb-coverage-title { font-weight: 600; color: #1f2329; margin-bottom: 4px; }
+.kb-coverage-row { color: #3f444d; }
+.kb-coverage-row.warn { color: #b06000; }
+.kb-coverage-row.info { color: #1a73e8; }
+.kb-coverage-row.ok { color: #137333; }
+.kb-coverage-tip { margin-left: 8px; color: #9aa0a6; font-size: 12px; }
 </style>

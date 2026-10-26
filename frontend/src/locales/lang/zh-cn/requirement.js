@@ -85,6 +85,7 @@ export default {
     fileRequired: '请选择文件',
     generateSuccess: '生成任务已提交！',
     generateFailed: '生成失败',
+    generateFailedReturnClarify: '用例生成失败，已返回需求澄清页，你可修改答案后重试',
     uploadSuccess: '文件上传成功',
     uploadFailed: '文件上传失败',
     fillRequiredInfo: '请填写必填信息',
@@ -558,6 +559,7 @@ export default {
     selectAll: '全选',
     selectedCount: '已选择 {count} 条用例',
     batchAdopt: '✅ 一键采纳 ({count})',
+    batchAdopting: '⏳ 采纳中 ({count})...',
     batchDiscard: '❌ 一键弃用 ({count})',
 
     // 表格头部

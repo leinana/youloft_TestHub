@@ -72,9 +72,13 @@
         <div class="batch-buttons">
           <button
             class="batch-adopt-btn"
-            :disabled="selectedCases.length === 0"
+            :disabled="selectedCases.length === 0 || isBatchAdopting"
             @click="batchAdopt">
-            {{ $t('taskDetail.batchAdopt', { count: selectedCases.length }) }}
+            <span v-if="isBatchAdopting" class="btn-loading">
+              <span class="spinner"></span>
+              {{ $t('taskDetail.batchAdopting', { count: selectedCases.length }) }}
+            </span>
+            <span v-else>{{ $t('taskDetail.batchAdopt', { count: selectedCases.length }) }}</span>
           </button>
           <button
             class="batch-discard-btn"
@@ -274,6 +278,7 @@ export default {
       currentPage: 1,
       pageSize: 10,
       isExporting: false,
+      isBatchAdopting: false,
       // 编辑相关状态
       isEditing: false,
       isSaving: false,
@@ -385,39 +390,57 @@ export default {
       }
       
       if (isTableFormat && tableData.length > 1) {
-        // 表格格式解析
-        const headers = tableData[0]
-        for (let i = 1; i < tableData.length; i++) {
+        // 判断第一行是表头还是数据行
+        const firstRow = tableData[0]
+        const headerKeywords = ['用例id', '编号', '测试目标', '测试场景', '场景', '标题',
+                                '前置条件', '测试步骤', '操作步骤', '步骤', '预期结果',
+                                '优先级', '测试类型', '关联需求', '用例标题']
+        const isHeaderRow = firstRow.some(cell => {
+          const clean = cell.toLowerCase().replace(/\*+/g, '').trim()
+          return headerKeywords.some(kw => clean.includes(kw))
+        })
+
+        // 确定表头和数据的起始位置
+        let headers, dataStartIndex
+        if (isHeaderRow) {
+          headers = firstRow
+          dataStartIndex = 1
+        } else {
+          // 无表头：使用位置映射
+          headers = ['用例ID', '测试目标', '前置条件', '操作步骤', '预期结果', '优先级', '测试类型', '关联需求']
+          dataStartIndex = 0
+        }
+
+        // 清理<br>标签的辅助函数
+        const cleanBrTags = (text) => {
+          if (!text) return ''
+          return text.replace(/<br\s*\/?>/gi, '\n')
+        }
+
+        for (let i = dataStartIndex; i < tableData.length; i++) {
           const row = tableData[i]
           const testCase = {}
-
-          // 清理<br>标签的辅助函数
-          const cleanBrTags = (text) => {
-            if (!text) return ''
-            return text.replace(/<br\s*\/?>/gi, '\n')
-          }
 
           headers.forEach((header, index) => {
             const value = cleanBrTags(row[index] || '')
 
-            // 使用更精确的匹配逻辑，避免误判
-            const cleanHeader = header.trim().toLowerCase()
+            // 使用更精确的匹配逻辑
+            const cleanHeader = header.toLowerCase().replace(/\*+/g, '').trim()
 
-            // 优先级匹配，避免误判
-            if (cleanHeader === '优先级' || cleanHeader === 'priority' || cleanHeader === 'priority（优先级）' || cleanHeader === '优先级（priority）') {
+            // 优先级匹配
+            if (cleanHeader === '优先级' || cleanHeader === 'priority' || cleanHeader.includes('优先级')) {
               testCase.priority = value
             } else if (cleanHeader === '用例id' || cleanHeader === '编号' || cleanHeader === 'id' || cleanHeader.includes('用例id')) {
               testCase.caseId = value
-            } else if (cleanHeader === '测试目标' || cleanHeader === '测试场景' || cleanHeader === '场景' || cleanHeader === '标题' || cleanHeader.includes('测试目标')) {
+            } else if (cleanHeader.includes('测试目标') || cleanHeader.includes('测试场景') || cleanHeader === '场景' || cleanHeader === '标题') {
               testCase.scenario = value
-            } else if (cleanHeader === '前置条件' || cleanHeader === '前置' || cleanHeader === '前提条件') {
+            } else if (cleanHeader.includes('前置条件') || cleanHeader === '前置' || cleanHeader === '前提条件') {
               testCase.precondition = value
-            } else if (cleanHeader === '测试步骤' || cleanHeader === '操作步骤' || cleanHeader === '步骤') {
-              // 确保不要误匹配"预期结果"中包含的"步骤"字样
+            } else if (cleanHeader.includes('测试步骤') || cleanHeader.includes('操作步骤') || cleanHeader === '步骤') {
               if (!cleanHeader.includes('预期') && !cleanHeader.includes('结果')) {
                 testCase.steps = value
               }
-            } else if (cleanHeader === '预期结果' || cleanHeader === '预期' || cleanHeader === '结果' || cleanHeader.includes('预期结果')) {
+            } else if (cleanHeader.includes('预期结果') || cleanHeader === '预期' || cleanHeader.includes('结果')) {
               testCase.expected = value
             }
           })
@@ -540,6 +563,7 @@ export default {
       }
 
       try {
+        this.isBatchAdopting = true
         const casesData = this.selectedCases.map((testCase, index) => ({
           title: testCase.scenario || `Test Case ${index + 1}`,
           description: testCase.scenario || '',
@@ -564,6 +588,8 @@ export default {
       } catch (error) {
         console.error('Batch adopt failed:', error)
         ElMessage.error(this.$t('taskDetail.batchAdoptFailed') + ': ' + (error.response?.data?.message || error.message))
+      } finally {
+        this.isBatchAdopting = false
       }
     },
 
@@ -792,6 +818,17 @@ export default {
           priority: this.mapPriority(testCase.priority),
           test_type: 'functional',
           status: 'draft'
+        }
+
+        // 带上任务关联的项目、版本和模块，确保采纳后能在用例列表查到
+        if (this.task.project) {
+          caseData.project_id = this.task.project
+        }
+        if (this.task.version_ids && this.task.version_ids.length > 0) {
+          caseData.version_ids = this.task.version_ids
+        }
+        if (this.task.function_module) {
+          caseData.function_module_id = this.task.function_module
         }
 
         await api.post('/testcases/', caseData)
@@ -1201,6 +1238,25 @@ export default {
 .batch-adopt-btn:disabled, .batch-discard-btn:disabled {
   background: #bdc3c7;
   cursor: not-allowed;
+}
+
+/* 按钮内 loading spinner */
+.btn-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .testcases-table {

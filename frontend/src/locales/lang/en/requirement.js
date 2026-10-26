@@ -75,6 +75,7 @@ export default {
     fileRequired: 'Please select a file',
     generateSuccess: 'Generation task submitted!',
     generateFailed: 'Generation failed',
+    generateFailedReturnClarify: 'Generation failed, returned to clarification page. You can edit your answers and retry.',
     uploadSuccess: 'File uploaded successfully',
     uploadFailed: 'File upload failed',
     fillRequiredInfo: 'Please fill in required information',
@@ -545,6 +546,7 @@ export default {
     selectAll: 'Select All',
     selectedCount: '{count} test cases selected',
     batchAdopt: '✅ Batch Adopt ({count})',
+    batchAdopting: '⏳ Adopting ({count})...',
     batchDiscard: '❌ Batch Discard ({count})',
 
     // Table Headers

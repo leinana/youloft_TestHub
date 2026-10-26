@@ -171,7 +171,11 @@ class VariableResolver:
         
         # 调用对应函数
         if func_name in self.functions:
-            return self.functions[func_name](func_name, args)
+            fn = self.functions[func_name]
+            # 时间/日期类函数按参数直接调用；工具类函数签名是 (func_name, args)
+            if func_name in ('timestamp', 'timestamp_sec', 'datetime', 'date', 'time', 'date_offset'):
+                return fn(*args)
+            return fn(func_name, args)
         else:
             raise ValueError(f"未知函数: {func_name}")
     

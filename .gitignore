@@ -1,5 +1,8 @@
 # 忽略虚拟环境及项目产生的临时文件
 .venv/
+venv/
+celerybeat-schedule.*
+_tmp_*.py
 .idea/
 .claude/
 .vscode/
@@ -19,11 +22,18 @@ logs/*/*
 .sql
 static_files/img/
 .bak
+*.bak
 # 忽略所有 app/*/migrations/ 目录下的所有内容 (包括文件和子目录)
 apps/*/migrations/*
 # 使用否定模式，例外地跟踪 __init__.py 文件
 !apps/*/migrations/__init__.py
 !apps/api_testing/migrations/0014_testsuite_scenario_config.py
+!apps/knowledge_base/migrations/*.py
+
+# 知识库运行时数据（采集快照/备份/临时文件，体积大且随时重建）
+media/kb_backup/
+media/kb_tmp/
+media/knowledge_collect/
 
 # 忽略 allure-static 下的所有文件（运行时生成）
 media/allure-static/*

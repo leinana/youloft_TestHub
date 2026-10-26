@@ -521,7 +521,19 @@ class AIModelService:
         writers = AIModelConfig.objects.filter(role='writer', is_active=True)
         if needs_vision:
             # 多模态：必须 supports_vision=True
-            return writers.filter(supports_vision=True).first()
+            vl_writer = writers.filter(supports_vision=True).first()
+            if vl_writer:
+                return vl_writer
+            # 回退：从任意角色中找一个启用的视觉模型（如澄清模型）
+            fallback = AIModelConfig.objects.filter(
+                supports_vision=True, is_active=True
+            ).first()
+            if fallback:
+                logger.info(
+                    f"[get_active_writer] 未找到视觉 writer，回退使用 {fallback.role} 视觉模型: "
+                    f"{fallback.model_name}"
+                )
+            return fallback
         else:
             # 纯文本：优先 supports_vision=False，没有则 fallback 任意
             txt = writers.filter(supports_vision=False).first()
@@ -1183,10 +1195,19 @@ class AIModelService:
 
         system_prompt = clarifier_prompt.content
 
-        # 构建多模态消息
+        # 构建多模态消息（DashScope Qwen 兼容格式：图片在前，文本在后）
         content_blocks = []
 
-        # 文本部分
+        # 图片部分（必须在文本之前，DashScope 格式要求）
+        for img in page_images:
+            content_blocks.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{img['media_type']};base64,{img['data']}"
+                }
+            })
+
+        # 文本部分（所有文本合并为一个 block）
         text_content = (
             f"请仔细分析以下需求文档的内容和各页面的截图（包含流程图、原型图、UI设计稿等视觉信息），"
             f"找出其中不明确、模糊、矛盾或缺失的信息点，并以结构化的问题列表形式输出。\n\n"
@@ -1207,24 +1228,10 @@ class AIModelService:
                f"- 如果知识背景与需求文档有冲突，以需求文档为准\n"
                f"- 提出的问题必须直接关联需求文档中的具体描述\n\n"
                if knowledge_base else "") +
-            f"【文档文本内容】\n{requirement_text}"
+            f"【文档文本内容】\n{requirement_text}\n\n"
+            f"请结合上述文档文本和各页面的截图，找出需求中不明确的地方并输出问题列表。"
         )
         content_blocks.append({"type": "text", "text": text_content})
-
-        # 图片部分
-        for img in page_images:
-            content_blocks.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{img['media_type']};base64,{img['data']}"
-                }
-            })
-
-        # 末尾指导
-        content_blocks.append({
-            "type": "text",
-            "text": "\n\n请结合上述文档文本和各页面的截图，找出需求中不明确的地方并输出问题列表。"
-        })
 
         openai_messages = [
             {"role": "system", "content": system_prompt},
@@ -1261,19 +1268,89 @@ class AIModelService:
         return full_content
 
     @staticmethod
-    async def generate_test_cases(task: TestCaseGenerationTask) -> str:
-        """生成测试用例"""
-        writer_prompt = task.writer_prompt_config.content
+    def _assess_complexity(text: str) -> dict:
+        """综合评估需求复杂度：功能点数量 + 每功能点详略 + 业务关键词"""
+        import re
+        if not text:
+            return {'level': 'simple', 'features': 0, 'avg_words': 0}
 
-        # 构建更明确的用户提示，采用思维链(CoT)引导和细粒度拆分策略
+        # 统计功能点：编号列表、markdown标题、bullet points、换行分段
+        feature_markers = re.findall(
+            r'(?:^|\n)\s*(?:\d+[\.\)、]|[-*]\s|[A-Z]+_\d+|#{1,3}\s)', text
+        )
+        feature_count = len(feature_markers)
+
+        # 如果没有显式的功能点标记，按段落（双换行）粗略估计
+        if feature_count == 0:
+            paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+            feature_count = max(1, len(paragraphs))
+
+        # 每功能点平均字数
+        words = len(re.findall(r'[一-鿿\w]+', text))
+        avg_words_per_feature = words / feature_count if feature_count > 0 else words
+
+        # 复杂业务关键词检测
+        complex_keywords = [
+            '支付', '交易', '订单', '退款', '结算', '对账',
+            '权限', '角色', '审批', '工作流', '状态机', '流转',
+            '安全', '加密', '鉴权', '令牌', 'OAuth', 'SSO',
+            '同步', '异步', '消息队列', '回调', 'WebSocket',
+            '数据库', '事务', '回滚', '锁', '并发',
+            'API', '接口', '协议', '网关', '限流', '降级',
+            '多端', '跨平台', '兼容', '国际化', '多语言',
+        ]
+        complex_hits = [kw for kw in complex_keywords if kw in text]
+
+        # 综合判定
+        if feature_count <= 3 and avg_words_per_feature < 100 and len(complex_hits) <= 1:
+            level = 'simple'
+        elif feature_count <= 6 and avg_words_per_feature < 200 and len(complex_hits) <= 3:
+            level = 'medium'
+        else:
+            level = 'complex'
+
+        return {
+            'level': level,
+            'features': feature_count,
+            'avg_words': int(avg_words_per_feature),
+            'complex_hits': complex_hits,
+        }
+
+    @staticmethod
+    def _build_generation_prompt(task: TestCaseGenerationTask) -> str:
+        """根据需求复杂度构建生成指令：简单需求精简，复杂需求详尽"""
+        c = AIModelService._assess_complexity(task.requirement_text or '')
+
+        if c['level'] == 'simple':
+            count_guide = (
+                f"1. **数量原则**：该需求较简单（{c['features']}个功能点，每点约{c['avg_words']}字），"
+                f"请精简输出。每个功能点设计 1 个正常场景 + 1 个关键异常场景，"
+                f"总数控制在 3-10 条。不做过度拆分，避免冗余。\n"
+                f"2. **覆盖要点**：正常流程 + 关键边界/异常（空值、超限、权限不足等），"
+                f"浅覆盖场景扩展库。\n"
+            )
+        elif c['level'] == 'medium':
+            count_guide = (
+                f"1. **数量原则**：该需求中等复杂度（{c['features']}个功能点），"
+                f"请合理覆盖。每个功能点设计 1 个正常场景 + 1-2 个异常/边界场景，"
+                f"总数控制在 8-20 条。\n"
+                f"2. **深度策略**：按文档结构逐节分析，覆盖关键异常和边界，不遗漏核心功能。\n"
+            )
+        else:
+            count_guide = (
+                f"1. **数量原则**：该需求较复杂（{c['features']}个功能点），"
+                f"请全面覆盖所有功能点、异常场景和边界条件，"
+                f"不设数量上限，应写尽写。\n"
+                f"2. **深度遍历策略**：\n"
+                f"   - 按文档结构逐章节分析，不遗漏末尾功能点。\n"
+                f"   - 每个功能点设计：1个正常场景 + 2-3个异常/边界场景。\n"
+            )
+
         user_message = (
             f"请深入分析以下需求文档，并设计高覆盖率的测试用例。\n\n"
             f"【生成指令】\n"
-            f"1. **数量原则**：请根据需求内容的实际复杂度，自动决定生成用例的数量。务必覆盖所有功能点、异常场景和边界条件，不设数量上限，应写尽写。\n"
-            f"2. **深度遍历策略**：\n"
-            f"   - 请按文档结构逐章节分析，不要遗漏末尾的功能点。\n"
-            f"   - 对每个功能点，必须设计：1个正常场景 + 2-3个异常/边界场景。\n"
-            f"3. **拒绝合并**：严禁将多个验证点合并在一条用例中。例如'验证输入框'应拆分为'输入为空'、'输入超长'、'输入特殊字符'等独立用例。\n"
+            + count_guide +
+            f"3. **拒绝合并**：严禁将多个验证点合并在一条用例中。\n"
             f"4. **场景扩展库**：\n"
             f"   - 数据完整性（必填项、默认值、数据类型）\n"
             f"   - 业务逻辑约束（状态流转、权限控制、重复操作）\n"
@@ -1292,6 +1369,13 @@ class AIModelService:
                if task.knowledge_base else "") +
             f"【需求文档内容】\n{task.requirement_text}"
         )
+        return user_message
+
+    @staticmethod
+    async def generate_test_cases(task: TestCaseGenerationTask) -> str:
+        """生成测试用例"""
+        writer_prompt = task.writer_prompt_config.content
+        user_message = AIModelService._build_generation_prompt(task)
 
         # 如果有需求澄清回答，追加到提示中
         if task.clarification_answers:
@@ -1374,34 +1458,7 @@ class AIModelService:
             str: 完整的测试用例内容
         """
         writer_prompt = task.writer_prompt_config.content
-
-        # 构建用户提示
-        user_message = (
-            f"请深入分析以下需求文档，并设计高覆盖率的测试用例。\n\n"
-            f"【生成指令】\n"
-            f"1. **数量原则**：请根据需求内容的实际复杂度，自动决定生成用例的数量。务必覆盖所有功能点、异常场景和边界条件，不设数量上限，应写尽写。\n"
-            f"2. **深度遍历策略**：\n"
-            f"   - 请按文档结构逐章节分析，不要遗漏末尾的功能点。\n"
-            f"   - 对每个功能点，必须设计：1个正常场景 + 2-3个异常/边界场景。\n"
-            f"3. **拒绝合并**：严禁将多个验证点合并在一条用例中。例如'验证输入框'应拆分为'输入为空'、'输入超长'、'输入特殊字符'等独立用例。\n"
-            f"4. **场景扩展库**：\n"
-            f"   - 数据完整性（必填项、默认值、数据类型）\n"
-            f"   - 业务逻辑约束（状态流转、权限控制、重复操作）\n"
-            f"   - 外部接口异常（超时、断网、返回错误）\n"
-            f"   - UI交互体验（提示文案、跳转逻辑、防误触）\n"
-            f"5. **⚠️ 输出顺序要求（必须严格执行）**：\n"
-            f"   - **必须按用例编号从小到大的顺序输出**（如：001, 002, 003...或LOGIN_001, LOGIN_002, LOGIN_003...）\n"
-            f"   - **绝对不能跳号、重复或乱序输出**\n"
-            f"   - **编号必须连续，中间不能有遗漏**\n"
-            f"   - **所有用例必须一次性完整输出，不能中断**\n"
-            rf"6. **⚠️ 特殊字符处理（关键）**：\n"
-            rf"   - **表格分隔符 '|' 必须保留**，不要在表格结构上做任何替换。\n"
-            rf"   - 如果单元格内容中包含管道符，请使用反斜杠转义 '\\|'。\n\n"
-            + (f"【项目知识背景 — 仅供参考】\n{task.knowledge_base}\n\n"
-               f"⚠️ 重要：以上背景知识仅供你理解需求中的业务术语和隐含约束。请严格以「需求文档内容」为设计依据。如果知识背景与需求文档有冲突，以需求文档为准。\n\n"
-               if task.knowledge_base else "") +
-            f"【需求文档内容】\n{task.requirement_text}"
-        )
+        user_message = AIModelService._build_generation_prompt(task)
 
         # 如果有需求澄清回答，追加到提示中
         if task.clarification_answers:
@@ -1656,10 +1713,24 @@ class AIModelService:
                 )
             })
 
-        # 文本部分
+        # 文本部分（根据复杂度评估追加指引）
+        c = AIModelService._assess_complexity(requirement_text or '')
+        if c['level'] == 'simple':
+            count_hint = (
+                f"该需求较简单（{c['features']}个功能点），"
+                f"请精简输出，每个功能点 1 正常 + 1 异常，总数 3-10 条。"
+            )
+        elif c['level'] == 'medium':
+            count_hint = (
+                f"该需求中等复杂度（{c['features']}个功能点），"
+                f"每个功能点 1 正常 + 1-2 异常，总数 8-20 条。"
+            )
+        else:
+            count_hint = "请全面覆盖所有功能点、异常和边界，不设上限。"
+
         text_content = (
             f"以下是一份需求文档的内容及其各页面的截图，请结合文字和图片信息来设计测试用例。\n\n"
-            f"【文档文本内容】\n{requirement_text}"
+            f"【文档文本内容】（约{len(requirement_text or '')}字，{c['features']}个功能点）\n{requirement_text}"
         )
         content_blocks.append({"type": "text", "text": text_content})
 
@@ -1676,8 +1747,9 @@ class AIModelService:
         content_blocks.append({
             "type": "text",
             "text": (
-                "\n\n请结合上述文档文本和各页面的截图（包含流程图、原型图、UI设计稿等视觉信息），"
-                "设计覆盖全面的测试用例。特别注意截图中的UI元素布局、流程连接、数据展示等视觉内容。"
+                f"\n\n请结合上述文档文本和各页面的截图（包含流程图、原型图、UI设计稿等视觉信息），"
+                f"设计覆盖全面的测试用例。特别注意截图中的UI元素布局、流程连接、数据展示等视觉内容。"
+                f"{count_hint}"
             )
         })
 

@@ -125,7 +125,9 @@ Custom prompts for AI test case generation are defined in:
 - `tester.md`: Test case writer persona and output format
 - `tester_pro.md`: Test case reviewer persona
 
-## Key Dependencies
+## Skills
+
+- `/api-test <version>` — 接口测试自动化全流程（YApi同步→AI分析→确认→报告）。详见 `.claude/skills/api-test.md`
 
 Backend: Django REST Framework, drf-spectacular, django-filter, celery, httpx, selenium, playwright, browser-use, langchain-openai
 
