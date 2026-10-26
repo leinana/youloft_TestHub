@@ -444,6 +444,11 @@ onMounted(async () => {
 .result-card { border: 1px solid #e5e8ef; border-radius: 9px; padding: 11px 12px; background: #fff; }
 .result-card.st-pass { border-left: 3px solid #12b76a; }
 .result-card.st-fail, .result-card.st-error { border-left: 3px solid #f04438; }
+.result-card.st-skip { border-left: 3px solid #d0d5dd; background: #fcfcfd; }
+.result-card.st-skip .result-name, .result-card.st-skip .result-status { color: #98a2b3; }
+.result-card.st-skip .result-index { background: #f2f4f7; color: #98a2b3; }
+/* 跳过不是错误：提示条改成中性灰，避免和失败混淆 */
+.result-card.st-skip .result-message { background: #f8fafc; color: #667085; }
 .result-head { display: flex; align-items: center; gap: 8px; }
 .result-index { width: 21px; height: 21px; border-radius: 50%; background: #f2f4f7; color: #475467; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; }
 .result-name { color: #344054; font-size: 13px; font-weight: 600; }

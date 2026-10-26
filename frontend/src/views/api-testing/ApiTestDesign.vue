@@ -32,6 +32,29 @@
       <span v-if="missingCount" class="flow-warning">还有 {{ missingCount }} 个字段待补齐</span>
     </div>
 
+    <div v-if="aiExcluded.length" class="excluded-panel">
+      <div class="missing-head">
+        <span class="missing-title">
+          AI 按业务流程排除了 {{ aiExcluded.length }} 个接口（没进场景）
+        </span>
+        <span class="excluded-actions">
+          <el-button link type="primary" size="small" @click="excludedExpanded = !excludedExpanded">
+            {{ excludedExpanded ? '收起' : '查看原因' }}
+          </el-button>
+          <el-button link type="primary" size="small" @click="addAllExcluded">全部补入</el-button>
+          <el-button link size="small" @click="dismissExcluded">知道了</el-button>
+        </span>
+      </div>
+      <div v-if="excludedExpanded" class="excluded-list">
+        <div v-for="item in aiExcluded" :key="'x' + item.request_id" class="excluded-row">
+          <span class="method" :class="`method-${String(item.method || 'get').toLowerCase()}`">{{ item.method }}</span>
+          <span class="excluded-name">{{ item.name }}</span>
+          <span class="excluded-reason">{{ item.reason }}</span>
+          <el-button link type="primary" size="small" @click="addOneExcluded(item)">加入</el-button>
+        </div>
+      </div>
+    </div>
+
     <div v-if="aiMissing.length || aiGuesses.length" class="missing-panel">
       <div class="missing-head">
         <span class="missing-title">
@@ -151,6 +174,7 @@
             </el-button>
             <el-button :disabled="steps.length < 2" title="只补齐还没连上的字段，不改顺序、不清空已填的值" @click="autoConnect">自动串联</el-button>
             <el-button :loading="saving" :disabled="!steps.length" @click="saveScenario(false)">保存</el-button>
+            <el-checkbox v-model="stopOnFailure" class="stop-on-fail" size="small">失败即停</el-checkbox>
             <el-button type="primary" :loading="running" :disabled="!steps.length" @click="saveAndRun">保存并执行</el-button>
           </div>
         </div>
@@ -511,6 +535,9 @@ const aiPlanning = ref(false)
 const aiGenerated = ref(false)
 const aiMissing = ref([])
 const aiGuesses = ref([])
+const aiExcluded = ref([])
+const excludedExpanded = ref(false)
+const stopOnFailure = ref(false)
 const selectedSuiteId = ref(null)
 const selectedStepUid = ref(null)
 const scenarioName = ref('未命名接口场景')
@@ -981,6 +1008,8 @@ function newScenario() {
   aiGenerated.value = false
   aiMissing.value = []
   aiGuesses.value = []
+  aiExcluded.value = []
+  excludedExpanded.value = false
 }
 
 function openSuite(suite) {
@@ -1072,6 +1101,8 @@ async function aiGenerate() {
   }
   aiPlanning.value = true
   aiMissing.value = []
+  aiExcluded.value = []
+  excludedExpanded.value = false
   try {
     const response = await api.post('/api-testing/agent/plan/', {
       project_id: projectId.value,
@@ -1088,13 +1119,14 @@ async function aiGenerate() {
     selectedStepUid.value = built[0].uid
     aiMissing.value = plan.missing || []
     aiGuesses.value = plan.guesses || []
+    aiExcluded.value = plan.excluded || []
     aiGenerated.value = true
     if (plan.scenario && (!scenarioName.value.trim() || scenarioName.value === '未命名接口场景')) {
       scenarioName.value = plan.scenario
     }
     const dropped = requestIds.length - built.length
     const parts = []
-    if (dropped > 0) parts.push(`排除 ${dropped} 个无关接口`)
+    if (dropped > 0) parts.push(`排除 ${dropped} 个无关接口，可在上方查看原因并补入`)
     if (aiMissing.value.length) parts.push(`${aiMissing.value.length} 个字段待补齐`)
     if (aiGuesses.value.length) parts.push(`${aiGuesses.value.length} 个值是 AI 猜的`)
     ElMessage.success(`AI 已生成 ${built.length} 步${parts.length ? `：${parts.join('，')}` : ''}`)
@@ -1135,6 +1167,42 @@ function guessOf(input) {
 function dismissAiHints() {
   aiMissing.value = []
   aiGuesses.value = []
+}
+
+function dismissExcluded() {
+  aiExcluded.value = []
+  excludedExpanded.value = false
+}
+
+function addOneExcluded(item) {
+  const request = requests.value.find((r) => r.id === item.request_id)
+  if (!request) {
+    ElMessage.warning('该接口已不在接口库中，可能被删除了')
+    aiExcluded.value = aiExcluded.value.filter((x) => x.request_id !== item.request_id)
+    return
+  }
+  if (isAdded(request.id)) {
+    aiExcluded.value = aiExcluded.value.filter((x) => x.request_id !== item.request_id)
+    ElMessage.info('这个接口已经在场景里了')
+    return
+  }
+  addInterface(request)
+  aiExcluded.value = aiExcluded.value.filter((x) => x.request_id !== item.request_id)
+}
+
+function addAllExcluded() {
+  const pending = aiExcluded.value.slice()
+  let added = 0
+  pending.forEach((item) => {
+    const request = requests.value.find((r) => r.id === item.request_id)
+    if (request && !isAdded(request.id)) {
+      addInterface(request)
+      added += 1
+    }
+  })
+  aiExcluded.value = []
+  excludedExpanded.value = false
+  ElMessage.success(added ? `已补入 ${added} 个接口，排在最后，可拖动或重跑 AI 调整顺序` : '这些接口已经在场景里了')
 }
 
 function onCollectionChange() {
@@ -1258,6 +1326,7 @@ async function saveAndRun() {
       test_suite_id: suite.id,
       environment_id: environmentId.value,
       steps: runSteps(steps.value),
+      stop_on_failure: stopOnFailure.value,
     }, { timeout: 300000 })
     const executionId = response.data.execution_id
     ElMessage.success('场景执行完成')
@@ -1388,10 +1457,11 @@ onBeforeUnmount(() => {
 .request-name { font-family: inherit; font-size: 13px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .request-path { color: #98a2b3; font-family: Consolas, monospace; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .add-mark { margin-left: auto; color: #98a2b3; font-size: 12px; }
-.scenario-toolbar { display: flex; align-items: center; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid #eef1f6; }
-.scenario-name { max-width: 310px; }
+.scenario-toolbar { display: flex; align-items: center; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid #eef1f6; flex-wrap: wrap; }
+/* 中间栏较窄时名称框会被按钮组挤到 0 宽，这里给最小宽度并允许按钮组换行 */
+.scenario-name { flex: 1 1 180px; min-width: 150px; max-width: 310px; }
 .scenario-name :deep(.el-input__wrapper) { box-shadow: none; background: #f7f9fc; }
-.toolbar-actions { display: flex; gap: 6px; margin-left: auto; }
+.toolbar-actions { display: flex; gap: 6px; margin-left: auto; flex: none; flex-wrap: wrap; justify-content: flex-end; }
 .empty-scenario { min-height: 360px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: #667085; padding: 30px; }
 .empty-scenario h3 { color: #273047; margin: 14px 0 6px; }
 .empty-scenario p { margin: 4px 0; font-size: 13px; }
@@ -1687,4 +1757,29 @@ onBeforeUnmount(() => {
 .guess-input :deep(.el-input__wrapper) { box-shadow: 0 0 0 1px #f0c98a inset; background: #fffdf7; }
 .guess-field { font-family: Consolas, monospace; color: #a96635; background: #fdf0dc; border-radius: 4px; padding: 2px 7px; }
 .guess-value { font-family: Consolas, monospace; color: #b42318; }
+
+/* AI 排除清单：信息性提示，用冷色与「缺数据」的暖色区分 */
+.excluded-panel {
+  margin: 12px 24px 0;
+  padding: 12px 16px;
+  background: #f5f8ff;
+  border: 1px solid #d8e3f5;
+  border-radius: 10px;
+}
+.excluded-panel .missing-title { color: #3a568c; }
+.excluded-actions { display: flex; align-items: center; gap: 2px; }
+.excluded-list { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; max-height: 190px; overflow-y: auto; }
+.excluded-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 0;
+  font-size: 12px;
+  color: #55617a;
+  flex-wrap: wrap;
+}
+.excluded-name { color: #34405c; }
+.excluded-reason { color: #7a869e; }
+.stop-on-fail { margin: 0 2px 0 6px; }
+.stop-on-fail :deep(.el-checkbox__label) { font-size: 12px; color: #55617a; }
 </style>

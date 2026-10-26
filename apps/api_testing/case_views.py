@@ -3,6 +3,7 @@
 """
 import json, asyncio, logging, re
 from django.utils import timezone
+from django.db.models import Q
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -341,7 +342,8 @@ def _call_upstream(upstream_name, path, project, session_cache, depth=0, allow_h
     if upstream_name in session_cache:
         return session_cache.get(upstream_name)
     from .models import ApiRequest
-    qs = ApiRequest.objects.filter(collection__project=project)
+    # 未归属集合的接口（手工新建没选版本）也要能找到，否则上游取数永远落空
+    qs = ApiRequest.objects.filter(Q(collection__project=project) | Q(collection__isnull=True))
     req = qs.filter(name__iexact=upstream_name).first() or qs.filter(name__icontains=upstream_name).first()
     if not req:
         session_cache[upstream_name] = None
@@ -412,7 +414,9 @@ def _find_from_history(var_name, project, allow_history=True):
         return None
     from .models import RequestHistory
     key = var_name.split('.')[-1]
-    qs = RequestHistory.objects.filter(request__collection__project=project).order_by('-executed_at')
+    qs = RequestHistory.objects.filter(
+        Q(request__collection__project=project) | Q(request__collection__isnull=True)
+    ).order_by('-executed_at')
     for h in qs[:80]:
         rd = h.response_data or {}
         body = rd.get('json')

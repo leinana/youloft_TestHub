@@ -12,6 +12,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from django.utils import timezone
+from django.db.models import Q
 
 from .models import ApiProject, ApiRequest, Environment, TestSuite, TestExecution
 from .param_analyzer import _get_ai_config
@@ -42,12 +43,13 @@ AGENT_PLAN_PROMPT = """你是接口自动化场景规划专家。用户会给出
       "capture": [ { "as": "变量名", "path": "响应路径，如 data.challenge_id" } ],
       "assertions": [ { "type": "status_code", "expected": 200 } ]
     }
-  ]
+  ],
+  "excluded": [ { "request_id": 123, "reason": "与主流程无关" } ]
 }
 
 规则：
 1. request_id 必须取自清单方括号里的数字，禁止编造；interface 必须与清单中的名称完全一致
-2. 按真实业务调用顺序排列；清单中与目标流程无关的接口直接排除
+2. 按真实业务调用顺序排列；清单中与目标流程无关的接口不要放进 steps，统一写进 excluded 并给出 20 字内的原因；用户描述若要求「全部保留 / 不要排除」，excluded 必须为空数组
 3. 参数和请求体的字段名必须使用清单中列出的字段名（含类型标注，如 is_open:bool），不要自造字段
 4. 只填写「接口必需字段」和「用户明确提到的字段」两类；用户没提到、且接口有默认值的可选字段一律不要填写，执行时会自动使用接口默认值
 5. 需要真实数据的字段用 {{变量}} 引用，但只能引用「前置步骤 capture 声明的变量」或「环境公参（userid/pairid/av/client 等）」里真实存在的名字，禁止自造变量名
@@ -101,8 +103,13 @@ def _summarize_interface(req):
     return pkeys[:12], bkeys[:12]
 
 
-def _call_ai(ai_config, prompt, system=''):
-    """调用 OpenAI 兼容接口"""
+def _plan_max_tokens(step_count):
+    """按候选接口数量给输出留足 token：每步约 250-300 token，下限 4096、上限 8192"""
+    return max(4096, min(8192, 1200 + 300 * max(step_count, 1)))
+
+
+def _call_ai(ai_config, prompt, system='', max_tokens=4096):
+    """调用 OpenAI 兼容接口，返回 (内容, finish_reason)"""
     import httpx
     messages = []
     if system:
@@ -112,7 +119,7 @@ def _call_ai(ai_config, prompt, system=''):
     body = {
         'model': ai_config['model_name'],
         'messages': messages,
-        'max_tokens': 4096,
+        'max_tokens': max_tokens,
         'temperature': 0.2,
     }
     headers = {
@@ -121,10 +128,11 @@ def _call_ai(ai_config, prompt, system=''):
     }
 
     async def _call():
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=180) as client:
             r = await client.post(url, headers=headers, json=body)
             r.raise_for_status()
-            return r.json()['choices'][0]['message']['content']
+            choice = r.json()['choices'][0]
+            return choice['message']['content'], choice.get('finish_reason')
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -180,18 +188,31 @@ def _resolve_dynamic_in_obj(data, resolver):
     return data
 
 
-def _find_request(project, step):
+def _project_requests(project, user=None):
+    """项目内可用接口：属于该项目集合的 + 未归属任何集合的。
+
+    未归属集合的接口（手工新建时没选版本、或早期 YApi 同步留下的记录）没有
+    collection 就查不到项目，原来会被漏掉，导致规划里少接口、执行时报「未找到接口」。
+    传 user 时按创建者隔离，与 ApiRequestViewSet.get_queryset 的口径保持一致。
+    """
+    scope = Q(collection__project=project) | Q(collection__isnull=True)
+    if user is not None:
+        scope = Q(collection__project=project) | Q(collection__isnull=True, created_by=user)
+    return ApiRequest.objects.filter(scope)
+
+
+def _find_request(project, step, user=None):
     """优先按 request_id 精确查找接口，兼容旧的按名称查找。"""
+    base = _project_requests(project, user)
     request_id = step.get('request_id')
     if request_id:
-        req = ApiRequest.objects.filter(id=request_id, collection__project=project).first()
+        req = base.filter(id=request_id).first()
         if req:
             return req
     name = step.get('interface') or ''
     if not name:
         return None
-    return ApiRequest.objects.filter(collection__project=project).filter(name__iexact=name).first() or \
-        ApiRequest.objects.filter(collection__project=project).filter(name__icontains=name).first()
+    return base.filter(name__iexact=name).first() or base.filter(name__icontains=name).first()
 
 
 def _coerce_like(value, template):
@@ -576,6 +597,31 @@ def _hydrate_plan_steps(steps, reqs, req_map):
     return result
 
 
+def _collect_excluded(ai_excluded, reqs, steps):
+    """汇总「AI 明确排除」+「AI 压根没纳入」的接口，让前端能把决策摊开给用户看"""
+    used = {st.get('request_id') for st in steps}
+    reasons = {}
+    for item in (ai_excluded or []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            rid = int(item.get('request_id'))
+        except (TypeError, ValueError):
+            continue
+        reasons[rid] = str(item.get('reason') or '').strip()[:60]
+    out = []
+    for r in reqs:
+        if r.id in used:
+            continue
+        out.append({
+            'request_id': r.id,
+            'name': r.name,
+            'method': (r.method or 'GET').upper(),
+            'reason': reasons.get(r.id) or 'AI 未纳入本次流程',
+        })
+    return out
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def plan_scenario(request):
@@ -593,7 +639,7 @@ def plan_scenario(request):
     if not project:
         return Response({'error': '项目不存在'}, status=404)
 
-    qs = ApiRequest.objects.filter(collection__project=project)
+    qs = _project_requests(project, request.user)
     if collection_id:
         try:
             qs = qs.filter(collection_id=int(collection_id))
@@ -633,7 +679,18 @@ def plan_scenario(request):
     if not ai_config:
         return Response({'error': '未配置 AI 模型，请先在配置里接入'}, status=500)
     try:
-        content = _call_ai(ai_config, prompt, system='你是接口自动化场景规划专家，只输出 JSON。')
+        content, finish_reason = _call_ai(ai_config, prompt, system='你是接口自动化场景规划专家，只输出 JSON。',
+                                          max_tokens=_plan_max_tokens(len(reqs)))
+        # 输出被 token 上限截断（接口太多）时，用紧凑模式重来一次，保证 JSON 完整
+        if finish_reason == 'length' or not content.strip().endswith('}'):
+            logger.warning(f'AI 输出疑似截断（finish_reason={finish_reason}），改用紧凑模式重试')
+            compact = prompt + (
+                '\n\n# 补充要求（上一次输出过长被截断）\n'
+                '必须输出完整合法的 JSON。为压缩长度：params 与 body 一律给 {}，'
+                'capture 只保留确实有下游依赖的字段，assertions 每条只需 {"type": "status_code", "expected": 200}。'
+            )
+            content, finish_reason = _call_ai(ai_config, compact, system='你是接口自动化场景规划专家，只输出 JSON。',
+                                              max_tokens=_plan_max_tokens(len(reqs)))
         plan = _parse_ai_json(content)
     except Exception as e:
         logger.error(f'Agent 规划失败: {e}')
@@ -648,6 +705,7 @@ def plan_scenario(request):
     plan['steps'] = steps
     plan['missing'] = _precheck_missing(steps, env_vars, req_map)
     plan['guesses'] = _collect_guesses(steps, req_map)
+    plan['excluded'] = _collect_excluded(plan.get('excluded'), reqs, steps)
     plan['candidate_count'] = len(reqs)
     plan['source'] = 'selection' if request_ids else 'description'
     return Response(plan)
@@ -659,6 +717,7 @@ def run_scenario(request):
     """按规划场景自动执行（正向流程，依赖 capture 自动取数）"""
     project_id = request.data.get('project_id')
     steps = request.data.get('steps') or []
+    stop_on_failure = bool(request.data.get('stop_on_failure'))
     if not project_id or not steps:
         return Response({'error': '需要 project_id 和 steps'}, status=400)
     project = ApiProject.objects.filter(id=int(project_id)).first()
@@ -705,11 +764,13 @@ def run_scenario(request):
         name = step.get('interface') or ''
         st = time.time()
         item = {'interface': name, 'name': name, 'index': len(results) + 1}
-        req = _find_request(project, step)
+        req = _find_request(project, step, request.user)
         if not req:
             item.update({'status': 'error', 'message': f'未找到接口: {name}',
                          'time_ms': int((time.time() - st) * 1000)})
             results.append(item)
+            if stop_on_failure:
+                break
             continue
         try:
             url = req.url or ''
@@ -811,6 +872,8 @@ def run_scenario(request):
                     'time_ms': int((time.time() - st) * 1000),
                 })
                 results.append(item)
+                if stop_on_failure:
+                    break
                 continue
 
             # 解析动态函数（${datetime()} 等）
@@ -887,6 +950,21 @@ def run_scenario(request):
             item.update({'status': 'error', 'message': str(e)[:200],
                          'time_ms': int((time.time() - st) * 1000)})
         results.append(item)
+        if stop_on_failure and item.get('status') != 'pass':
+            break
+
+    # 失败即停：剩余步骤标成 skipped，避免前端看到「步数变少」误以为被丢弃
+    if stop_on_failure and len(results) < len(steps):
+        for rest in steps[len(results):]:
+            results.append({
+                'interface': rest.get('interface') or '',
+                'name': rest.get('interface') or '',
+                'request_id': rest.get('request_id'),
+                'index': len(results) + 1,
+                'status': 'skip',
+                'message': '前序步骤失败，已跳过',
+                'time_ms': 0,
+            })
 
     execution_id = None
     if execution is not None:
