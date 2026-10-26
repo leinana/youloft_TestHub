@@ -1022,8 +1022,10 @@ import { getVariableFunctions } from '@/api/data-factory'
 import { CodeGenerator } from '@/utils/codeGenerator'
 import { debounce } from 'lodash-es'
 import { useI18n } from 'vue-i18n'
+import { useRoute } from 'vue-router'
 
 const { t } = useI18n()
+const route = useRoute()
 
 const treeRef = ref(null)
 const expandedKeys = ref([])
@@ -1214,13 +1216,46 @@ const loadProjects = async () => {
   try {
     projects.value = await fetchAllPages('/api-testing/projects/')
     if (projects.value.length > 0) {
-      selectedProject.value = projects.value[0].id
+      // 从测试设计页「高级编辑」跳过来时会带 project，优先落在该接口所属项目
+      const requested = Number(route.query.project)
+      selectedProject.value = projects.value.some(item => item.id === requested)
+        ? requested
+        : projects.value[0].id
       await loadCollections(selectedProject.value)
       await loadEnvironments(selectedProject.value)
     }
   } catch (error) {
     ElMessage.error('加载项目失败')
     console.error('加载项目失败:', error)
+  }
+}
+
+// 在树里按 id 找接口节点
+const findRequestNode = (nodes, requestId) => {
+  for (const node of nodes) {
+    if (node.type === 'request' && node.id === requestId) return node
+    if (node.children && node.children.length) {
+      const found = findRequestNode(node.children, requestId)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+// 支持 /api-testing/interfaces?project=1&request=12 直接打开某个接口
+const selectRequestFromQuery = async () => {
+  const requestId = Number(route.query.request)
+  if (!requestId) return
+  const node = findRequestNode(collections.value, requestId)
+  if (node) {
+    selectSearchResult(node)
+    return
+  }
+  try {
+    const response = await api.get(`/api-testing/requests/${requestId}/`)
+    selectedRequest.value = response.data
+  } catch (error) {
+    ElMessage.warning('未能打开指定接口，请在左侧手动选择')
   }
 }
 
@@ -2928,6 +2963,7 @@ const loadVariableFunctions = async () => {
 onMounted(async () => {
   await loadProjects()
   await loadVariableFunctions()
+  await selectRequestFromQuery()
 
   // 添加全局点击事件监听器，用于隐藏右键菜单
   document.addEventListener('click', handleGlobalClick)

@@ -396,6 +396,7 @@ const breadcrumbTitle = computed(() => {
     // 接口测试
     '/api-testing/design': '测试设计',
     '/api-testing/runs': '执行与报告',
+    '/api-testing/interfaces': '接口高级编辑',
     '/api-testing/projects': '项目管理',
     '/api-testing/environments': '环境管理',
     '/api-testing/scheduled-tasks': '定时任务',

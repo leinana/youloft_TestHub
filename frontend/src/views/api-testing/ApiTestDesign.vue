@@ -99,9 +99,14 @@
             接口库
             <span class="count-badge">{{ filteredRequests.length }}</span>
           </span>
-          <el-button link type="primary" class="normalize-link" :disabled="!activeConnection" @click="normalizeProjectPaths">
-            统一路径
-          </el-button>
+          <span class="interface-title-actions">
+            <el-button link type="primary" class="normalize-link" title="手工新建一个接口，不必等 YApi 同步" @click="openInterfaceCreator">
+              新建接口
+            </el-button>
+            <el-button link type="primary" class="normalize-link" :disabled="!activeConnection" @click="normalizeProjectPaths">
+              统一路径
+            </el-button>
+          </span>
         </div>
         <el-input v-model="searchText" placeholder="搜索接口名称或路径" clearable size="small" />
         <div class="request-list">
@@ -110,6 +115,7 @@
             :key="request.id"
             class="request-item"
             :class="{ added: isAdded(request.id) }"
+            @contextmenu.prevent.stop="openRequestMenu($event, request)"
           >
             <button class="request-add" @click="addInterface(request)">
               <span class="method" :class="`method-${String(request.method || 'get').toLowerCase()}`">{{ request.method }}</span>
@@ -119,7 +125,6 @@
               </span>
               <span class="add-mark">{{ isAdded(request.id) ? '已加入' : '+' }}</span>
             </button>
-            <button class="request-edit" type="button" @click.stop="openInterfaceEditor(request)">编辑</button>
           </div>
           <div v-if="!filteredRequests.length" class="empty-mini">当前项目没有可选择的接口</div>
         </div>
@@ -296,16 +301,39 @@
       </aside>
     </main>
 
-    <el-dialog v-model="interfaceEditVisible" title="编辑接口" width="520px">
+    <teleport to="body">
+      <ul
+        v-if="requestMenuVisible"
+        class="request-menu"
+        :style="{ left: requestMenuX + 'px', top: requestMenuY + 'px' }"
+      >
+        <li @click="editRequestFromMenu">编辑接口</li>
+        <li class="danger" @click="deleteRequestFromMenu">删除接口</li>
+      </ul>
+    </teleport>
+
+    <el-dialog
+      v-model="interfaceEditVisible"
+      :title="interfaceEditForm.id ? '编辑接口' : '新建接口'"
+      width="560px"
+      :close-on-click-modal="false"
+    >
       <el-form label-position="top">
         <el-form-item label="接口名称">
           <el-input v-model="interfaceEditForm.name" maxlength="200" placeholder="例如：创建订单" />
         </el-form-item>
-        <el-form-item label="请求方法">
-          <el-select v-model="interfaceEditForm.method" style="width: 100%">
-            <el-option v-for="method in httpMethods" :key="method" :label="method" :value="method" />
-          </el-select>
-        </el-form-item>
+        <div class="form-row">
+          <el-form-item label="请求方法">
+            <el-select v-model="interfaceEditForm.method" style="width: 100%">
+              <el-option v-for="method in httpMethods" :key="method" :label="method" :value="method" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="所属版本">
+            <el-select v-model="interfaceEditForm.collection" clearable placeholder="不归属任何版本" style="width: 100%">
+              <el-option v-for="item in collections" :key="item.id" :label="item.name" :value="item.id" />
+            </el-select>
+          </el-form-item>
+        </div>
         <el-form-item label="接口路径">
           <el-input v-model="interfaceEditForm.url" placeholder="推荐：{{base_url}}/模块/接口" />
         </el-form-item>
@@ -314,9 +342,22 @@
         推荐统一使用 <code v-pre>{{base_url}}/模块/接口</code>。执行时会自动替换为当前环境配置的地址，
         切换测试或预发环境时不需要修改接口。
       </div>
+      <el-checkbox v-if="!interfaceEditForm.id" v-model="interfaceJoinScenario" class="interface-join-check">
+        创建后直接加入当前场景
+      </el-checkbox>
       <template #footer>
-        <el-button @click="interfaceEditVisible = false">取消</el-button>
-        <el-button type="primary" :loading="interfaceSaving" @click="saveInterfaceEdit">保存修改</el-button>
+        <div class="interface-dialog-footer">
+          <el-button v-if="interfaceEditForm.id" link type="primary" @click="openAdvancedEditor">
+            高级编辑（参数 / Body / 断言）
+          </el-button>
+          <span v-else class="footer-hint">创建后可在右侧面板补参数；需要 Body、断言时点「编辑 → 高级编辑」</span>
+          <span class="footer-actions">
+            <el-button @click="interfaceEditVisible = false">取消</el-button>
+            <el-button type="primary" :loading="interfaceSaving" @click="saveInterfaceEdit">
+              {{ interfaceEditForm.id ? '保存修改' : '创建接口' }}
+            </el-button>
+          </span>
+        </div>
       </template>
     </el-dialog>
 
@@ -433,7 +474,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '@/utils/api'
@@ -480,7 +521,8 @@ const saving = ref(false)
 const running = ref(false)
 const interfaceEditVisible = ref(false)
 const interfaceSaving = ref(false)
-const interfaceEditForm = ref({ id: null, name: '', method: 'GET', url: '' })
+const interfaceJoinScenario = ref(true)
+const interfaceEditForm = ref({ id: null, name: '', method: 'GET', url: '', collection: null })
 const httpMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
 
 const yapiDrawer = ref(false)
@@ -732,14 +774,122 @@ async function deleteSuite(suite) {
   }
 }
 
+function escapeHtml(text) {
+  return String(text ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))
+}
+
+// 哪些已保存场景用到了这个接口（场景步骤里存的是 request_id）
+function scenarioRefsOf(requestId) {
+  return suites.value.filter((suite) => {
+    const list = Array.isArray(suite.scenario_config?.steps) ? suite.scenario_config.steps : []
+    return list.some((saved) => saved.request_id === requestId)
+  })
+}
+
+async function deleteInterface(request) {
+  const refs = scenarioRefsOf(request.id)
+  const usedInCurrent = steps.value.some((step) => step.request.id === request.id)
+  const notes = []
+  if (refs.length) {
+    const names = refs.map((suite) => `「${escapeHtml(suite.name)}」`).join('、')
+    notes.push(`已保存场景 ${names} 引用了它，删除后这些场景里对应的这一步会消失`)
+  }
+  if (usedInCurrent) notes.push('当前正在编辑的场景也包含它，会同时从步骤中移除')
+  notes.push('该接口的执行历史记录会一起删除')
+
+  const message = [`确定删除接口「${escapeHtml(request.name)}」吗？`, ...notes.map((note) => `· ${note}`), '此操作不可恢复。'].join('<br>')
+  try {
+    await ElMessageBox.confirm(message, '删除接口', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      dangerouslyUseHTMLString: true,
+    })
+    await api.delete(`/api-testing/requests/${request.id}/`)
+    requests.value = requests.value.filter((item) => item.id !== request.id)
+    if (usedInCurrent) {
+      const index = steps.value.findIndex((step) => step.request.id === request.id)
+      if (index >= 0) removeStep(index)
+    }
+    if (interfaceEditVisible.value && interfaceEditForm.value.id === request.id) {
+      interfaceEditVisible.value = false
+    }
+    ElMessage.success('接口已删除')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error(`删除失败：${error.response?.data?.detail || error.message}`)
+    }
+  }
+}
+
+const requestMenuVisible = ref(false)
+const requestMenuRequest = ref(null)
+const requestMenuX = ref(0)
+const requestMenuY = ref(0)
+
+const REQUEST_MENU_WIDTH = 132
+const REQUEST_MENU_HEIGHT = 82
+
+// 接口右键菜单：定位到鼠标位置，靠边时向内收，避免出屏
+function openRequestMenu(event, request) {
+  requestMenuRequest.value = request
+  const maxX = window.innerWidth - REQUEST_MENU_WIDTH - 8
+  const maxY = window.innerHeight - REQUEST_MENU_HEIGHT - 8
+  requestMenuX.value = Math.min(event.clientX, Math.max(8, maxX))
+  requestMenuY.value = Math.min(event.clientY, Math.max(8, maxY))
+  requestMenuVisible.value = true
+}
+
+function closeRequestMenu() {
+  requestMenuVisible.value = false
+  requestMenuRequest.value = null
+}
+
+function editRequestFromMenu() {
+  const request = requestMenuRequest.value
+  closeRequestMenu()
+  if (request) openInterfaceEditor(request)
+}
+
+async function deleteRequestFromMenu() {
+  const request = requestMenuRequest.value
+  closeRequestMenu()
+  if (request) await deleteInterface(request)
+}
+
 function openInterfaceEditor(request) {
   interfaceEditForm.value = {
     id: request.id,
     name: request.name || '',
     method: request.method || 'GET',
     url: request.url || '',
+    collection: request.collection || null,
   }
   interfaceEditVisible.value = true
+}
+
+// 手工新建接口：默认落到当前版本，避免建完在筛选条件下看不到
+function openInterfaceCreator() {
+  interfaceJoinScenario.value = true
+  interfaceEditForm.value = {
+    id: null,
+    name: '',
+    method: 'GET',
+    url: '',
+    collection: collectionId.value || null,
+  }
+  interfaceEditVisible.value = true
+}
+
+// 跳到完整编辑器补参数、Body 和断言（该页不进主菜单，只作为深度编辑入口）
+function openAdvancedEditor() {
+  const form = interfaceEditForm.value
+  if (!form.id) return
+  interfaceEditVisible.value = false
+  router.push({
+    path: '/api-testing/interfaces',
+    query: { project: projectId.value, request: form.id },
+  })
 }
 
 async function saveInterfaceEdit() {
@@ -750,10 +900,35 @@ async function saveInterfaceEdit() {
   }
   interfaceSaving.value = true
   try {
+    if (!form.id) {
+      // 新建：集合可为空（未归类接口对当前用户可见），其余字段走模型默认值
+      const response = await api.post('/api-testing/requests/', {
+        name: form.name.trim(),
+        method: form.method,
+        url: form.url.trim(),
+        collection: form.collection || null,
+        params: {},
+        headers: [],
+        body: {},
+      })
+      const created = response.data
+      requests.value.unshift(created)
+      searchText.value = ''
+      requestPage.value = 1
+      interfaceEditVisible.value = false
+      if (interfaceJoinScenario.value) {
+        addInterface(created)
+        ElMessage.success(`接口已创建并加入场景：${created.name}`)
+      } else {
+        ElMessage.success(`接口已创建：${created.name}`)
+      }
+      return
+    }
     const response = await api.patch(`/api-testing/requests/${form.id}/`, {
       name: form.name.trim(),
       method: form.method,
       url: form.url.trim(),
+      collection: form.collection || null,
     })
     const current = requests.value.find((request) => request.id === form.id)
     if (current) Object.assign(current, response.data)
@@ -1138,6 +1313,10 @@ function go(path) {
 }
 
 onMounted(async () => {
+  document.addEventListener('click', closeRequestMenu)
+  document.addEventListener('contextmenu', closeRequestMenu)
+  document.addEventListener('scroll', closeRequestMenu, true)
+  window.addEventListener('resize', closeRequestMenu)
   loading.value = true
   try {
     await loadProjects()
@@ -1146,6 +1325,13 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', closeRequestMenu)
+  document.removeEventListener('contextmenu', closeRequestMenu)
+  document.removeEventListener('scroll', closeRequestMenu, true)
+  window.removeEventListener('resize', closeRequestMenu)
 })
 </script>
 
@@ -1436,24 +1622,38 @@ onMounted(async () => {
   text-align: left;
   cursor: pointer;
 }
-.request-edit {
-  flex: none;
-  align-self: center;
-  border: 0;
-  background: transparent;
-  color: #7284ad;
-  font-family: inherit;
-  padding: 5px 7px;
-  font-size: 12px;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity .15s, color .15s;
+/* 接口右键菜单 */
+.request-menu {
+  position: fixed;
+  z-index: 3000;
+  min-width: 132px;
+  margin: 0;
+  padding: 6px 0;
+  list-style: none;
+  background: #fff;
+  border: 1px solid #e9ecf3;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(52, 65, 91, .14);
 }
-.request-edit:hover { color: #536ca5; }
-.request-item:hover .request-edit,
-.request-item:focus-within .request-edit { opacity: 1; }
+.request-menu li {
+  padding: 8px 16px;
+  font-size: 13px;
+  color: #34415b;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.request-menu li:hover { background: #f5f8ff; color: #536ca5; }
+.request-menu li.danger { color: #b96a72; }
+.request-menu li.danger:hover { background: #fef3f2; color: #b42318; }
 .interface-title-left { display: flex; align-items: center; gap: 7px; }
+.interface-title-actions { display: flex; align-items: center; gap: 4px; }
 .normalize-link { font-size: 12px; }
+.form-row { display: flex; gap: 12px; }
+.form-row :deep(.el-form-item) { flex: 1; min-width: 0; }
+.interface-join-check { margin-top: 2px; }
+.interface-dialog-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.footer-hint { color: #98a2b3; font-size: 12px; }
+.footer-actions { display: flex; gap: 8px; margin-left: auto; }
 .path-format-tip {
   margin-top: 4px;
   padding: 10px 12px;

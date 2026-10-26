@@ -235,7 +235,12 @@ const routes = [
             },
             // 旧入口重定向，保持历史链接可用
             { path: 'dashboard', redirect: '/api-testing/design' },
-            { path: 'interfaces', redirect: '/api-testing/design' },
+            // 接口高级编辑：只作为设计页「高级编辑」的落地页，不进主菜单
+            {
+                path: 'interfaces',
+                name: 'ApiInterfaces',
+                component: () => import('@/views/api-testing/InterfaceManagement.vue')
+            },
             { path: 'automation', redirect: '/api-testing/design' },
             { path: 'history', redirect: '/api-testing/runs' },
             { path: 'reports', redirect: '/api-testing/runs' },
