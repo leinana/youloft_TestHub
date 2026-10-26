@@ -8,6 +8,22 @@ from typing import List, Dict, Optional
 logger = logging.getLogger(__name__)
 
 
+class YApiError(Exception):
+    """YApi 返回非 0 errcode"""
+
+    code = 'YAPI_ERROR'
+
+    def __init__(self, message: str, errcode=None):
+        super().__init__(message)
+        self.errcode = errcode
+
+
+class YApiAuthError(YApiError):
+    """YApi 登录态失效（Token 过期 / 被踢下线），需要用户更新 Token"""
+
+    code = 'YAPI_TOKEN_INVALID'
+
+
 class YApiClient:
     """YApi API 客户端（只读）"""
 
@@ -26,13 +42,21 @@ class YApiClient:
         async with httpx.AsyncClient(timeout=30, cookies=self._cookies()) as client:
             r = await client.get(url, params=params)
             r.raise_for_status()
-            data = r.json()
+            try:
+                data = r.json()
+            except Exception:
+                raise YApiError(
+                    f'YApi 返回了非 JSON 内容（HTTP {r.status_code}），请检查 YApi 地址 {self.base_url} 是否正确'
+                )
             if data.get('errcode') and data['errcode'] != 0:
                 errcode = data['errcode']
-                if errcode == 40011:
+                if errcode in (40011, 40014):
                     # YApi 登录态失效：给出明确指引
-                    raise Exception('YApi Token 已失效（40011 请登录），请到 YApi 同步页点击「更新 Token」重新获取后重试')
-                raise Exception(f"YApi Error [{errcode}]: {data.get('errmsg')}")
+                    raise YApiAuthError(
+                        'YApi Token 已失效（%s 请登录），请点击「更新 Token」重新获取后重试' % errcode,
+                        errcode=errcode,
+                    )
+                raise YApiError(f"YApi Error [{errcode}]: {data.get('errmsg')}", errcode=errcode)
             return data
 
     async def get_project_info(self) -> dict:
@@ -50,6 +74,9 @@ class YApiClient:
             cats = await self.get_cat_menu()
             for c in cats:
                 cat_map[c.get('_id', 0)] = c.get('name', '未分类')
+        except YApiAuthError:
+            # 鉴权失效必须冒泡，否则会被后续请求的同一个错误掩盖成「分类为空」
+            raise
         except Exception:
             pass
 

@@ -2,17 +2,43 @@
 YApi 集成 — API 视图
 """
 import asyncio
+import httpx
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied
 from django.db import models
+from django.utils import timezone
 from urllib.parse import urlsplit
 import re
 
 from .models import ApiProject, Environment, YApiConnection, YApiSyncLog
 from .yapi_sync import YApiSyncService
 from .serializers import YApiConnectionSerializer, YApiSyncLogSerializer
+
+
+def _yapi_error_response(exc):
+    """把 YApi / 网络异常转成前端可判别的响应。
+
+    - Token 失效 → 400 + code=YAPI_TOKEN_INVALID（前端据此弹出「更新 Token」）
+    - 其他 YApi 错误 → 400 + code=YAPI_ERROR
+    - 连不上 YApi / 非 JSON → 502（这是环境问题，不是用户配置错误）
+    """
+    from .yapi_client import YApiError
+    if isinstance(exc, YApiError):
+        return Response(
+            {'error': str(exc), 'code': exc.code, 'errcode': getattr(exc, 'errcode', None)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if isinstance(exc, (httpx.HTTPError, OSError)):
+        return Response(
+            {'error': '连不上 YApi：%s' % exc, 'code': 'YAPI_UNREACHABLE'},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+    return Response(
+        {'error': str(exc), 'code': 'YAPI_INTERNAL'},
+        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+    )
 
 
 class YApiConnectionViewSet(viewsets.ModelViewSet):
@@ -56,17 +82,59 @@ class YApiConnectionViewSet(viewsets.ModelViewSet):
         path_prefixes = request.data.get('path_prefixes', None)
         service = YApiSyncService(conn)
 
+        loop = None
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             result = loop.run_until_complete(service.sync(cat_ids=cat_ids, path_prefixes=path_prefixes))
-            loop.close()
             return Response(result)
         except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            return _yapi_error_response(e)
+        finally:
+            if loop is not None:
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+
+    @action(detail=True, methods=['get'], url_path='verify-token')
+    def verify_token(self, request, pk=None):
+        """真实请求一次 YApi，验证 Token 是否可用。
+
+        Token 的「剩余天数」只是按 token_updated_at + token_valid_days 推算的日期，
+        与 YApi 侧真实登录态无关（YApi 可能提前失效）。此接口用一次真实调用给出结论。
+        """
+        conn = self.get_object()
+        from .yapi_client import YApiClient
+        client = YApiClient(
+            base_url=conn.yapi_url, token=conn.yapi_token,
+            project_id=conn.yapi_project_id, uid=conn.yapi_uid,
+        )
+        loop = asyncio.new_event_loop()
+        loop_was_set = False
+        try:
+            asyncio.set_event_loop(loop)
+            loop_was_set = True
+            # 用 getCatMenu 探活：这正是「版本列表」走的那一步，能同时反映 Token 与项目权限
+            cats = loop.run_until_complete(client.get_cat_menu())
+            return Response({
+                'ok': True,
+                'cat_count': len(cats or []),
+                'checked_at': timezone.now(),
+                'expire_days': YApiConnectionSerializer(conn).get_token_remaining_days(conn),
+            })
+        except Exception as e:
+            resp = _yapi_error_response(e)
+            payload = dict(resp.data)
+            payload['ok'] = False
+            payload['checked_at'] = timezone.now()
+            return Response(payload)
+        finally:
+            if loop_was_set:
+                try:
+                    loop.close()
+                except Exception:
+                    pass
 
     @action(detail=True, methods=['get'])
     def categories(self, request, pk=None):
@@ -80,9 +148,11 @@ class YApiConnectionViewSet(viewsets.ModelViewSet):
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            cats = loop.run_until_complete(client.get_cat_menu())
-            interfaces = loop.run_until_complete(client.fetch_all_interfaces())
-            loop.close()
+            try:
+                cats = loop.run_until_complete(client.get_cat_menu())
+                interfaces = loop.run_until_complete(client.fetch_all_interfaces())
+            finally:
+                loop.close()
 
             from collections import defaultdict
             cat_map = {c.get('_id'): c.get('name', '') for c in cats}
@@ -111,7 +181,7 @@ class YApiConnectionViewSet(viewsets.ModelViewSet):
 
             return Response({'categories': cat_list, 'total_interfaces': len(interfaces)})
         except Exception as e:
-            return Response({'error': str(e)}, status=500)
+            return _yapi_error_response(e)
 
     @action(detail=True, methods=['get'])
     def logs(self, request, pk=None):
@@ -179,8 +249,10 @@ class YApiConnectionViewSet(viewsets.ModelViewSet):
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            interfaces = loop.run_until_complete(client.fetch_all_with_details())
-            loop.close()
+            try:
+                interfaces = loop.run_until_complete(client.fetch_all_with_details())
+            finally:
+                loop.close()
             summary = [{
                 'id': i.get('_id'),
                 'title': i.get('title', ''),
@@ -193,5 +265,5 @@ class YApiConnectionViewSet(viewsets.ModelViewSet):
                 'interfaces': summary,
             })
         except Exception as e:
-            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return _yapi_error_response(e)
 # touch-reload-marker

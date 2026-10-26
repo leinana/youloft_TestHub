@@ -9,6 +9,23 @@
       <el-button type="primary" @click="openCreateDialog">新建连接</el-button>
     </el-empty>
 
+    <el-alert
+      v-if="tokenInvalid"
+      class="token-alert"
+      type="error"
+      title="YApi Token 已失效，版本列表与同步都会失败"
+      :closable="false"
+      show-icon
+    >
+      <div class="alert-body">
+        <div class="alert-text">{{ tokenCheck.message || 'YApi 拒绝了当前 Token（40011 请登录），请更新后重试。' }}</div>
+        <div class="alert-actions">
+          <el-button size="small" type="primary" @click="openEditDialog">去更新 Token</el-button>
+          <el-button size="small" @click="verifyToken">重新校验</el-button>
+        </div>
+      </div>
+    </el-alert>
+
     <el-card v-if="connection" class="config-card">
       <template #header>
         <div style="display:flex;justify-content:space-between;align-items:center">
@@ -26,17 +43,20 @@
         </el-select>
         <el-button size="small" type="primary" @click="openCreateDialog">新建连接</el-button>
         <el-button size="small" type="warning" @click="fixBaseUrl" :loading="fixing">统一路径格式</el-button>
+        <el-button size="small" @click="verifyToken" :loading="checkingToken">校验 Token</el-button>
       </div>
       <el-descriptions :column="2" border size="small">
         <el-descriptions-item label="YApi">{{ connection.yapi_url }}</el-descriptions-item>
         <el-descriptions-item label="项目 ID">{{ connection.yapi_project_id }}</el-descriptions-item>
         <el-descriptions-item label="关联">{{ connection.project_name }}</el-descriptions-item>
         <el-descriptions-item label="上次同步">{{ fmtTime(connection.last_synced_at) }}</el-descriptions-item>
-        <el-descriptions-item label="Token 有效期">
+        <el-descriptions-item label="Token 状态" :span="2">
           <span :class="tokenStatusClass">{{ tokenStatusText }}</span>
+          <span v-if="tokenCheck.at" class="check-time">（实测于 {{ fmtTime(tokenCheck.at) }}）</span>
         </el-descriptions-item>
       </el-descriptions>
     </el-card>
+
 
     <el-card v-if="connection" style="margin-top:16px">
       <template #header>
@@ -46,14 +66,22 @@
             <el-button size="small" @click="loadCategories" :loading="loadingCats">刷新</el-button>
             <el-button size="small" @click="selectedCats=categories.filter(c=>/^v?\d/.test(c.name)).map(c=>c.catid)">只选版本号</el-button>
             <el-button size="small" @click="selectedCats=[]">清空</el-button>
-            <el-button size="small" type="primary" @click="startSync" :loading="syncing" :disabled="selectedCats.length===0">
+            <el-button
+              size="small" type="primary" @click="startSync" :loading="syncing"
+              :disabled="selectedCats.length===0 || tokenInvalid"
+            >
               {{ syncing ? '同步中...' : `同步 ${selectedCats.length} 个版本` }}
             </el-button>
           </div>
         </div>
       </template>
 
-      <div class="ver-list">
+      <div v-loading="loadingCats" class="ver-list">
+        <el-empty
+          v-if="!sortedCats.length && !loadingCats"
+          :description="tokenInvalid ? 'Token 失效，读不到版本列表' : '没有读到分类，可点上方「刷新」重试'"
+          :image-size="70"
+        />
         <div v-for="c in sortedCats" :key="c.catid" class="ver-row">
           <div class="ver-main" @click="toggleExpand(c.catid)">
             <el-icon class="expand-icon" :class="{ expanded: expandedCats.has(c.catid) }">
@@ -182,12 +210,77 @@ const toggleCat = (catid) => {
 const methodColor = (m) => ({ GET: 'success', POST: 'primary', PUT: 'warning', DELETE: 'danger', PATCH: 'info' }[m] || '')
 
 const fmtDays = (v) => (Number.isInteger(v) ? String(v) : v.toFixed(1))
+
+// 「剩余天数」只是按 token_updated_at + token_valid_days 推算的日期，
+// 与 YApi 侧真实登录态无关（YApi 可能提前失效），所以进页面用一次真实请求校验。
+const tokenCheck = ref({ state: 'idle', message: '', at: null })
+const checkingToken = ref(false)
+const tokenInvalid = computed(() => tokenCheck.value.state === 'invalid')
+
 const tokenStatusText = computed(() => {
   const c = connection.value
-  if (!c || c.token_remaining_days === null || c.token_remaining_days === undefined) return '未知（保存连接后生效）'
-  if (c.token_status === 'expired') return `已过期 ${fmtDays(Math.abs(c.token_remaining_days))} 天，请更新 Token`
-  return `剩余 ${fmtDays(c.token_remaining_days)} 天`
+  const st = tokenCheck.value.state
+  const days = c?.token_remaining_days
+  const daysText = days === null || days === undefined
+    ? ''
+    : (c.token_status === 'expired' ? `日期推算已过期 ${fmtDays(Math.abs(days))} 天` : `日期推算剩余 ${fmtDays(days)} 天`)
+
+  if (st === 'checking') return '校验中…'
+  if (st === 'invalid') return '已失效（YApi 拒绝当前 Token）'
+  if (st === 'error') return `校验失败：${tokenCheck.value.message || '连不上 YApi'}`
+  if (st === 'ok') {
+    return daysText ? `可用（已实测）· ${daysText}` : '可用（已实测）'
+  }
+  return daysText || '未知（保存连接后生效）'
 })
+
+const verifyToken = async () => {
+  if (!connection.value) return
+  checkingToken.value = true
+  tokenCheck.value = { state: 'checking', message: '', at: null }
+  try {
+    const r = await api.get(
+      `/api-testing/yapi-connections/${connection.value.id}/verify-token/`,
+      { timeout: 25000 }
+    )
+    const d = r.data || {}
+    if (d.ok) {
+      tokenCheck.value = { state: 'ok', message: '', at: d.checked_at || new Date() }
+    } else {
+      tokenCheck.value = {
+        state: d.code === 'YAPI_TOKEN_INVALID' ? 'invalid' : 'error',
+        message: d.error || 'YApi 拒绝访问',
+        at: d.checked_at || new Date(),
+      }
+    }
+  } catch (e) {
+    tokenCheck.value = {
+      state: 'error',
+      message: e.response?.data?.error || e.message,
+      at: new Date(),
+    }
+  } finally { checkingToken.value = false }
+}
+
+/** YApi 相关错误统一出口：Token 失效 → 直接给「去更新 Token」，不再只弹一句红字 */
+const handleYapiError = async (e, prefix = '操作失败') => {
+  const data = e.response?.data || {}
+  if (data.code === 'YAPI_TOKEN_INVALID') {
+    tokenCheck.value = { state: 'invalid', message: data.error, at: new Date() }
+    ElMessage.warning('YApi Token 已失效，需要更新后重试')
+    try {
+      await ElMessageBox.confirm(
+        '当前 Token 已被 YApi 拒绝（40011 请登录）。请登录 YApi → 浏览器开发者工具 → Cookies 复制 _yapi_token 的值，粘贴到这里。',
+        '需要更新 Token',
+        { type: 'warning', confirmButtonText: '立即更新', cancelButtonText: '稍后' }
+      )
+      openEditDialog()
+    } catch (_) {}
+    return
+  }
+  ElMessage.error(`${prefix}: ${data.error || e.message}`)
+}
+
 const fmtTime = (iso) => {
   if (!iso) return '从未'
   const d = new Date(iso)
@@ -197,6 +290,12 @@ const fmtTime = (iso) => {
 }
 
 const tokenStatusClass = computed(() => {
+  const st = tokenCheck.value.state
+  if (st === 'invalid' || st === 'error') return 'tok-expired'
+  if (st === 'ok') {
+    const d = connection.value?.token_remaining_days
+    return d !== null && d !== undefined && d <= 2 ? 'tok-warn' : 'tok-ok'
+  }
   const c = connection.value
   if (!c || c.token_status === 'unknown') return ''
   if (c.token_status === 'expired') return 'tok-expired'
@@ -224,7 +323,13 @@ const loadConnection = async () => {
   expandedCats.clear()
   logs.value = []
   lastSyncResult.value = null
-  if (connection.value) { await loadLogs(); await loadCategories() }
+  tokenCheck.value = { state: 'idle', message: '', at: null }
+  if (connection.value) {
+    // 先实测 Token：失效时 categories 预期会 400，不用再弹一次错
+    verifyToken()
+    loadLogs()
+    loadCategories()
+  }
 }
 
 const loadLogs = async () => {
@@ -240,7 +345,13 @@ const loadCategories = async () => {
     const r = await api.get(`/api-testing/yapi-connections/${connection.value.id}/categories/`)
     categories.value = r.data.categories || []
   } catch (e) {
-    ElMessage.error('加载失败: ' + (e.response?.data?.error || e.message))
+    const data = e.response?.data || {}
+    if (data.code === 'YAPI_TOKEN_INVALID') {
+      // 顶部红色告警条已足够显眼，这里不再叠 toast
+      tokenCheck.value = { state: 'invalid', message: data.error, at: new Date() }
+    } else {
+      ElMessage.error('加载失败: ' + (data.error || e.message))
+    }
   } finally { loadingCats.value = false }
 }
 
@@ -315,6 +426,7 @@ const saveConnection = async () => {
       token_valid_days: form.token_valid_days || 7,
     }
     if (form.yapi_token) payload.yapi_token = form.yapi_token
+    const tokenChanged = !!form.yapi_token
     if (form.id) {
       await api.put(`/api-testing/yapi-connections/${form.id}/`, payload)
       ElMessage.success('连接已更新')
@@ -324,6 +436,8 @@ const saveConnection = async () => {
     }
     dialogVisible.value = false
     await loadConnections()
+    // 换 Token 后立刻实测一次，让用户当场知道新 Token 到底能不能用
+    if (tokenChanged) await verifyToken()
   } catch (e) {
     ElMessage.error('保存失败: ' + (e.response?.data?.error || e.message))
   } finally { saving.value = false }
@@ -339,7 +453,7 @@ const fixBaseUrl = async () => {
     const r = await api.post(`/api-testing/yapi-connections/${connection.value.id}/fix_base_url/`)
     ElMessage.success(`完成：补全 ${r.data.updated} 个，跳过 ${r.data.skipped} 个`)
   } catch (e) {
-    ElMessage.error('执行失败: ' + (e.response?.data?.error || e.message))
+    await handleYapiError(e, '执行失败')
   } finally { fixing.value = false }
 }
 
@@ -353,7 +467,7 @@ const startSync = async () => {
     ElMessage.success(`完成: 新增${r.data.new} 更新${r.data.updated}`)
     await loadLogs()
   } catch (e) {
-    ElMessage.error('同步失败: ' + (e.response?.data?.error || e.message))
+    await handleYapiError(e, '同步失败')
   } finally { syncing.value = false }
 }
 
@@ -384,6 +498,12 @@ onMounted(() => { loadConnections() })
 .tok-ok { color: #137333; }
 .tok-warn { color: #e37400; font-weight: 600; }
 .tok-expired { color: #c5221f; font-weight: 700; }
+.token-alert { margin-bottom: 16px; }
+.alert-body { display: flex; align-items: center; gap: 16px; }
+.alert-text { flex: 1; min-width: 0; }
+.alert-detail { font-size: 12px; margin-top: 2px; word-break: break-all; }
+.alert-actions { flex: none; display: flex; gap: 8px; }
+.check-time { font-size: 12px; color: #909399; margin-left: 6px; }
 .form-tip { font-size: 12px; color: #909399; margin-left: 8px; }
 .log-count { font-size: 12px; color: #909399; font-weight: 400; margin-left: 6px; }
 </style>
