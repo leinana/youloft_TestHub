@@ -110,7 +110,7 @@
             v-model:current-page="suitePage"
             :page-size="suitePageSize"
             :total="suites.length"
-            :pager-count="3"
+            :pager-count="5"
             layout="prev, pager, next"
             size="small"
             background
@@ -157,7 +157,7 @@
             v-model:current-page="requestPage"
             :page-size="requestPageSize"
             :total="filteredRequests.length"
-            :pager-count="3"
+            :pager-count="5"
             layout="prev, pager, next"
             size="small"
             background
@@ -226,9 +226,90 @@
         </div>
 
         <section class="inspector-section">
-          <div class="section-head">
-            <h4>请求参数</h4>
-            <span>可直接填写固定值，或选择上一步的结果</span>
+          <div class="section-head param-head">
+            <div class="param-head-text">
+              <h4>请求参数</h4>
+              <span>可直接填写固定值，或选择上一步的结果</span>
+            </div>
+            <div class="param-head-actions">
+              <el-popover
+                v-model:visible="sharedFillVisible"
+                placement="bottom-end"
+                :width="360"
+                trigger="click"
+                popper-class="shared-fill-popper"
+                @show="initSharedFill"
+              >
+                <template #reference>
+                  <button type="button" class="mini-link">
+                    填入公参<span v-if="sharedFillRows.length" class="mini-count">{{ sharedFillRows.length }}</span>
+                  </button>
+                </template>
+                <div class="shared-fill">
+                  <div class="shared-fill-title">
+                    <span>{{ effectiveEnv ? effectiveEnv.name : '未选择执行环境' }}</span>
+                    <button v-if="sharedSelectableCount" type="button" class="mini-link" @click="toggleAllSharedFill">
+                      {{ allSharedChecked ? '全不选' : '全选' }}
+                    </button>
+                  </div>
+                  <div v-if="!effectiveEnv" class="shared-fill-empty">请先在顶部选择执行环境</div>
+                  <div v-else-if="!sharedFillRows.length" class="shared-fill-empty">
+                    这个环境还没有公共参数，可在「配置 → 公共请求头与参数」里添加
+                  </div>
+                  <div v-else class="shared-fill-list">
+                    <label
+                      v-for="row in sharedFillRows"
+                      :key="row.uid"
+                      class="shared-fill-row"
+                      :class="{ disabled: row.bound }"
+                      :title="`${row.key} = ${row.value}${row.description ? ' · ' + row.description : ''}`"
+                    >
+                      <el-checkbox v-model="sharedFillChecks[row.uid]" :disabled="row.bound" />
+                      <span class="shared-fill-key">{{ row.key }}</span>
+                      <span class="shared-fill-value">{{ row.value === '' ? '（空值）' : row.value }}</span>
+                      <span class="shared-fill-tag">{{ row.location === 'headers' ? '请求头' : '参数' }}</span>
+                      <span v-if="row.bound" class="shared-fill-flag warn">已绑上游</span>
+                      <span v-else-if="row.hasValue" class="shared-fill-flag">已有值</span>
+                    </label>
+                  </div>
+                  <div class="shared-fill-foot">
+                    <span class="shared-fill-tip">默认只勾没填的；已有值的勾上会覆盖</span>
+                    <el-button size="small" type="primary" :disabled="!sharedFillSelectedCount" @click="applySharedFill">
+                      填入{{ sharedFillSelectedCount ? ` ${sharedFillSelectedCount} 项` : '' }}
+                    </el-button>
+                  </div>
+                </div>
+              </el-popover>
+              <button type="button" class="mini-link" @click="openNewInput">+ 新增参数</button>
+            </div>
+          </div>
+          <!-- 新增表单紧跟标题栏，点开就能看到，不用往下翻 -->
+          <div v-if="newInputVisible" class="new-input-row">
+            <div class="new-input-controls">
+              <el-select v-model="newInputForm.location" size="small" class="new-input-location">
+                <el-option v-for="item in newInputLocations" :key="item.value" :label="item.label" :value="item.value" />
+              </el-select>
+              <el-input
+                v-model="newInputForm.key"
+                size="small"
+                placeholder="参数名，如 page"
+                @keyup.enter="confirmNewInput"
+              />
+              <el-input
+                v-model="newInputForm.value"
+                size="small"
+                class="new-input-value"
+                placeholder="固定值，可留空"
+                @keyup.enter="confirmNewInput"
+              />
+            </div>
+            <div class="new-input-foot">
+              <span class="new-input-tip">Body 用 a.b 指定嵌套字段；同名参数会被覆盖</span>
+              <div class="new-input-actions">
+                <el-button size="small" text @click="cancelNewInput">取消</el-button>
+                <el-button size="small" type="primary" @click="confirmNewInput">添加</el-button>
+              </div>
+            </div>
           </div>
           <div v-if="!selectedStep.inputs.length" class="empty-mini">这个接口没有需要配置的输入字段</div>
           <div v-for="input in selectedStep.inputs" :key="`${input.location}-${input.path}`" class="input-row">
@@ -397,6 +478,17 @@
         </div>
         <div class="drawer-section-title">选择要同步的版本或分类</div>
         <div v-if="yapiLoading" class="drawer-loading">正在读取 YApi 分类...</div>
+        <div v-else-if="yapiError" class="drawer-error">
+          <div class="drawer-error-title">
+            {{ yapiError.code === 'YAPI_TOKEN_INVALID' ? 'YApi Token 已失效，读不到分类' : '读取 YApi 失败' }}
+          </div>
+          <div class="drawer-error-msg">{{ yapiError.message }}</div>
+          <el-button
+            v-if="yapiError.code === 'YAPI_TOKEN_INVALID'"
+            size="small" type="primary" @click="go('/api-testing/yapi-sync')"
+          >去更新 Token</el-button>
+          <el-button size="small" @click="openYapiDrawer">重试</el-button>
+        </div>
         <el-checkbox-group v-else v-model="selectedCats" class="category-list">
           <el-checkbox v-for="category in yapiCategories" :key="category.catid" :value="category.catid" class="category-item">
             <span>{{ category.name }}</span>
@@ -510,11 +602,14 @@ import {
   cleanupCaptures,
   clearInputBinding,
   createStep,
+  getByPath,
   hydrateSteps,
+  isUnset,
   refreshStep,
   runSteps,
   scenarioPayload,
   scenarioStats,
+  setByPath,
   sourceOptions,
   writeInputValue,
 } from '@/utils/apiScenario'
@@ -556,6 +651,7 @@ const yapiDrawer = ref(false)
 const yapiLoading = ref(false)
 const yapiSyncing = ref(false)
 const yapiCategories = ref([])
+const yapiError = ref(null)
 const selectedCats = ref([])
 const settingsVisible = ref(false)
 
@@ -1089,6 +1185,167 @@ function onInputValueChange(input) {
   refreshStep(selectedStep.value)
 }
 
+// ---------- 公共参数一键填入 / 手工新增参数 ----------
+// 执行时后端本来就会把环境公参补进来，但步骤里看不到、也改不了。
+// 这里让操作者按需把公参「落到」当前步骤：看得见、能改、也能只挑其中几个。
+const sharedFillVisible = ref(false)
+const sharedFillChecks = ref({})
+const newInputVisible = ref(false)
+const newInputForm = ref({ location: 'params', key: '', value: '' })
+const newInputLocations = [
+  { value: 'params', label: '参数' },
+  { value: 'headers', label: '请求头' },
+  { value: 'body', label: 'Body' },
+]
+
+// 与后端执行时的环境优先级保持一致：顶部所选 → 生效环境 → 第一个
+const effectiveEnv = computed(() => {
+  const list = environments.value
+  if (!list.length) return null
+  return list.find((env) => env.id === environmentId.value)
+    || list.find((env) => env.is_active)
+    || list[0]
+})
+
+function isRowEnabled(row) {
+  const enabled = row?.enabled
+  return enabled !== false && enabled !== 0 && enabled !== '0'
+}
+
+function stepValueAt(step, location, key) {
+  if (!step || !key) return undefined
+  if (location === 'headers') return (step.headers || {})[key]
+  if (location === 'params') return (step.params || {})[key]
+  const body = step.body
+  if (!body || typeof body !== 'object') return undefined
+  return getByPath(body, key)
+}
+
+const sharedFillRows = computed(() => {
+  const env = effectiveEnv.value
+  const step = selectedStep.value
+  if (!env || !step) return []
+  const rows = []
+  const collect = (list, location) => {
+    ;(list || []).forEach((item) => {
+      const key = String(item?.key || '').trim()
+      if (!key || !isRowEnabled(item)) return
+      if (rows.some((row) => row.location === location && row.key === key)) return
+      const bound = (step.bindings || []).some(
+        (binding) => binding.target_location === location && binding.target_path === key,
+      )
+      rows.push({
+        uid: `${location}|${key}`,
+        key,
+        value: item?.value ?? '',
+        description: item?.description || '',
+        location,
+        bound,
+        hasValue: !isUnset(stepValueAt(step, location, key)),
+      })
+    })
+  }
+  collect(env.default_params, 'params')
+  collect(env.default_headers, 'headers')
+  return rows
+})
+
+const sharedSelectableCount = computed(() => sharedFillRows.value.filter((row) => !row.bound).length)
+const sharedFillSelectedCount = computed(
+  () => sharedFillRows.value.filter((row) => !row.bound && sharedFillChecks.value[row.uid]).length,
+)
+const allSharedChecked = computed(() => {
+  const selectable = sharedFillRows.value.filter((row) => !row.bound)
+  return selectable.length > 0 && selectable.every((row) => sharedFillChecks.value[row.uid])
+})
+
+// 打开时重置勾选：没填过的默认勾上，已有值/已绑上游的不勾，避免误覆盖
+function initSharedFill() {
+  const checks = {}
+  sharedFillRows.value.forEach((row) => {
+    checks[row.uid] = !row.hasValue && !row.bound
+  })
+  sharedFillChecks.value = checks
+}
+
+function toggleAllSharedFill() {
+  const next = !allSharedChecked.value
+  const checks = { ...sharedFillChecks.value }
+  sharedFillRows.value.forEach((row) => {
+    if (!row.bound) checks[row.uid] = next
+  })
+  sharedFillChecks.value = checks
+}
+
+function applySharedFill() {
+  const step = selectedStep.value
+  if (!step) return
+  let filled = 0
+  let overwritten = 0
+  sharedFillRows.value.forEach((row) => {
+    if (row.bound || !sharedFillChecks.value[row.uid]) return
+    const target = row.location === 'headers' ? step.headers : step.params
+    if (!target || typeof target !== 'object') return
+    if (isUnset(target[row.key])) filled += 1
+    else overwritten += 1
+    target[row.key] = row.value
+  })
+  sharedFillVisible.value = false
+  if (!filled && !overwritten) {
+    ElMessage.info('没有勾选任何公共参数')
+    return
+  }
+  refreshStep(step)
+  const parts = []
+  if (filled) parts.push(`填入 ${filled} 项`)
+  if (overwritten) parts.push(`覆盖 ${overwritten} 项`)
+  ElMessage.success(`公共参数已${parts.join('、')}`)
+}
+
+function openNewInput() {
+  newInputForm.value = { location: 'params', key: '', value: '' }
+  newInputVisible.value = true
+}
+
+function cancelNewInput() {
+  newInputVisible.value = false
+}
+
+function confirmNewInput() {
+  const step = selectedStep.value
+  if (!step) return
+  const key = String(newInputForm.value.key || '').trim()
+  const location = newInputForm.value.location
+  const value = newInputForm.value.value
+  if (!key) {
+    ElMessage.warning('请先填写参数名')
+    return
+  }
+  const existed = !isUnset(stepValueAt(step, location, key))
+  if (location === 'body') {
+    if (step.body === null || step.body === undefined) step.body = {}
+    if (typeof step.body !== 'object' || Array.isArray(step.body)) {
+      ElMessage.warning('这个接口的 Body 不是对象结构，请用「高级编辑」修改')
+      return
+    }
+    setByPath(step.body, key, value)
+  } else {
+    const target = location === 'headers' ? step.headers : step.params
+    if (!target || typeof target !== 'object') return
+    target[key] = value
+  }
+  refreshStep(step)
+  newInputVisible.value = false
+  const label = newInputLocations.find((item) => item.value === location)?.label || location
+  ElMessage.success(`${existed ? '已更新' : '已添加'}${label} · ${key}`)
+}
+
+// 切换步骤时收起浮层与新增表单，避免把上一步的输入带到下一步
+watch(selectedStepUid, () => {
+  sharedFillVisible.value = false
+  newInputVisible.value = false
+})
+
 async function aiGenerate() {
   if (!projectId.value) {
     ElMessage.warning('请先选择项目')
@@ -1345,6 +1602,7 @@ async function openYapiDrawer() {
   yapiDrawer.value = true
   yapiCategories.value = []
   selectedCats.value = []
+  yapiError.value = null
   if (!activeConnection.value) return
   yapiLoading.value = true
   try {
@@ -1352,7 +1610,11 @@ async function openYapiDrawer() {
     yapiCategories.value = response.data.categories || []
     selectedCats.value = yapiCategories.value.length ? [yapiCategories.value[0].catid] : []
   } catch (error) {
-    ElMessage.error(`读取 YApi 分类失败：${error.response?.data?.error || error.message}`)
+    const data = error.response?.data || {}
+    yapiError.value = { code: data.code || '', message: data.error || error.message }
+    if (data.code !== 'YAPI_TOKEN_INVALID') {
+      ElMessage.error(`读取 YApi 分类失败：${yapiError.value.message}`)
+    }
   } finally {
     yapiLoading.value = false
   }
@@ -1369,7 +1631,11 @@ async function syncYapi() {
     yapiDrawer.value = false
     await loadProjectData()
   } catch (error) {
-    ElMessage.error(`同步失败：${error.response?.data?.error || error.message}`)
+    const data = error.response?.data || {}
+    if (data.code === 'YAPI_TOKEN_INVALID') {
+      yapiError.value = { code: data.code, message: data.error }
+    }
+    ElMessage.error(`同步失败：${data.error || error.message}`)
   } finally {
     yapiSyncing.value = false
   }
@@ -1494,6 +1760,74 @@ onBeforeUnmount(() => {
 .input-controls { display: grid; grid-template-columns: minmax(0, 1fr) 118px; gap: 7px; }
 .source-select :deep(.el-select__placeholder) { font-size: 11px; }
 .binding-note { margin-top: 5px; color: #175cd3; font-size: 11px; }
+.param-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.param-head-text span { display: block; margin-top: 2px; }
+.param-head-actions { display: flex; align-items: center; gap: 10px; flex: none; }
+.mini-link {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: #3d63b8;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.mini-link:hover { color: #2a4c96; text-decoration: underline; }
+.mini-count { background: #eef2fb; border-radius: 8px; padding: 0 5px; font-size: 10px; color: #55698f; }
+.new-input-row { margin-top: 10px; padding: 10px; border: 1px dashed #c9d6ee; border-radius: 8px; background: #fbfcff; }
+/* 右栏只有 360px，三个输入框并排会把中文 placeholder 挤坏，改成「位置 + 参数名」一行、值独占一行 */
+.new-input-controls { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 6px; }
+.new-input-value { grid-column: 1 / -1; }
+.new-input-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.new-input-tip { color: #98a2b3; font-size: 11px; }
+.new-input-actions { display: flex; gap: 4px; }
+.new-input-actions :deep(.el-button) { margin-left: 0; }
+/* 公共参数浮层渲染在 body 上，scoped 命中不到，统一用 :global 限定在 popper-class 内 */
+:global(.shared-fill-popper) { padding: 12px; }
+:global(.shared-fill-title) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #344054;
+}
+:global(.shared-fill-empty) { color: #98a2b3; font-size: 12px; line-height: 1.6; padding: 2px 0 6px; }
+:global(.shared-fill-list) { max-height: 236px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
+:global(.shared-fill-row) { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 6px; cursor: pointer; }
+:global(.shared-fill-row:hover) { background: #f5f8ff; }
+:global(.shared-fill-row.disabled) { opacity: .6; cursor: not-allowed; }
+:global(.shared-fill-key) { color: #273047; font-size: 12px; font-weight: 600; flex: none; }
+:global(.shared-fill-value) {
+  flex: 1;
+  min-width: 0;
+  color: #667085;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:global(.shared-fill-tag) { flex: none; color: #98a2b3; background: #f2f4f7; border-radius: 4px; padding: 1px 5px; font-size: 10px; }
+:global(.shared-fill-flag) { flex: none; color: #9a6a1f; background: #fdf3e2; border-radius: 4px; padding: 1px 5px; font-size: 10px; }
+:global(.shared-fill-flag.warn) { color: #175cd3; background: #eff4ff; }
+:global(.shared-fill-foot) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid #eef1f6;
+  flex-wrap: wrap;
+}
+:global(.shared-fill-tip) { flex: 1 1 128px; color: #98a2b3; font-size: 10.5px; line-height: 1.4; }
 .output-list { display: flex; flex-direction: column; gap: 3px; max-height: 300px; overflow-y: auto; }
 .output-item { display: flex; align-items: center; gap: 7px; padding: 6px 7px; border-radius: 6px; background: #f8fafc; font-size: 11px; }
 .output-path { min-width: 0; font-family: Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1511,6 +1845,9 @@ onBeforeUnmount(() => {
 .category-item small { color: #98a2b3; }
 .drawer-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .drawer-empty { padding-top: 40px; text-align: center; color: #667085; }
+.drawer-error { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px; border-radius: 9px; background: #fef3f2; border: 1px solid #fecdc9; }
+.drawer-error-title { font-weight: 650; color: #b42318; font-size: 13px; }
+.drawer-error-msg { color: #912018; font-size: 12px; line-height: 1.6; word-break: break-all; }
 .settings-tip { color: #667085; font-size: 13px; line-height: 1.7; }
 .settings-list { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
 .settings-item { display: flex; flex-direction: column; gap: 4px; padding: 12px; border: 1px solid #e5e8ef; border-radius: 9px; }
