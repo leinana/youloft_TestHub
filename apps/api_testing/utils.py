@@ -5,6 +5,28 @@ from .models import RequestHistory
 from .variable_resolver import VariableResolver
 
 
+def _ensure_full_url(url, variables, api_request):
+    """相对路径补全 base_url（兼容 YApi 同步的裸路径，如 /diary/v2/edit）"""
+    if not isinstance(url, str) or url.startswith(('http://', 'https://', '//')):
+        return url
+    base_url = str(variables.get('base_url') or '').rstrip('/')
+    if not base_url:
+        try:
+            from .models import Environment
+            _proj = api_request.collection.project if api_request.collection else None
+            _env = None
+            if _proj:
+                _env = Environment.objects.filter(project=_proj, is_active=True).first()
+            if _env is None:
+                _env = Environment.objects.filter(is_active=True).first()
+            base_url = str((_env.variables or {}).get('base_url') or '').rstrip('/') if _env else ''
+        except Exception:
+            base_url = ''
+    if base_url:
+        return base_url + (url if url.startswith('/') else '/' + url)
+    return url
+
+
 def execute_assertions(response, assertions):
     """执行断言验证"""
     results = []
@@ -146,6 +168,8 @@ def execute_test_suite(test_suite, environment, executed_by):
                 # 替换URL中的变量（先解析动态函数，再替换环境变量）
                 url = _replace_variables(api_request.url, variables)
                 url = resolver.resolve(url)
+                # 相对路径补全 base_url
+                url = _ensure_full_url(url, variables, api_request)
                 
                 # 准备请求头
                 headers = {}
@@ -215,7 +239,15 @@ def execute_test_suite(test_suite, environment, executed_by):
                     for assertion_result in assertions_results:
                         if not assertion_result.get('passed', True):
                             passed = False
-                            error_message = f"断言失败: {assertion_result.get('name', '未命名断言')} - {assertion_result.get('error', '断言不通过')}"
+                            _detail = assertion_result.get('error')
+                            if not _detail:
+                                _detail = '期望 %s，实际 %s' % (
+                                    assertion_result.get('expected'), assertion_result.get('actual'))
+                            error_message = "断言失败: %s（%s）- %s" % (
+                                assertion_result.get('name', '未命名断言'),
+                                assertion_result.get('type', ''),
+                                _detail,
+                            )
                             break
                 
                 if passed:
@@ -242,7 +274,7 @@ def execute_test_suite(test_suite, environment, executed_by):
                         'url': url,
                         'method': api_request.method,
                         'headers': headers,
-                        '极速版params': params,
+                        'params': params,
                         'body': body_data
                     },
                     response_data={
@@ -253,6 +285,7 @@ def execute_test_suite(test_suite, environment, executed_by):
                     status_code=response.status_code,
                     response_time=response_time,
                     assertions_results=assertions_results,
+                    error_message=error_message,
                     executed_by=executed_by
                 )
                 
@@ -307,6 +340,8 @@ def execute_api_request(api_request, environment, executed_by):
         # 替换URL中的变量（先解析动态函数，再替换环境变量）
         url = _replace_variables(api_request.url, variables)
         url = resolver.resolve(url)
+        # 相对路径补全 base_url
+        url = _ensure_full_url(url, variables, api_request)
         
         # 准备请求头
         headers = {}

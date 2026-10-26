@@ -1,7 +1,8 @@
 from django.contrib import admin
 from .models import (
     ApiProject, ApiCollection, ApiRequest, Environment, RequestHistory,
-    TestSuite, TestExecution, ScheduledTask, TaskExecutionLog, AIServiceConfig
+    TestSuite, TestExecution, ScheduledTask, TaskExecutionLog, AIServiceConfig,
+    YApiConnection, YApiSyncLog
 )
 
 
@@ -98,3 +99,19 @@ class AIServiceConfigAdmin(admin.ModelAdmin):
         if request.user.is_superuser:
             return qs
         return qs.filter(created_by=request.user)
+
+# ===== YApi 集成 =====
+@admin.register(YApiConnection)
+class YApiConnectionAdmin(admin.ModelAdmin):
+    list_display = ['name', 'project', 'yapi_url', 'yapi_project_id', 'auto_sync', 'last_synced_at', 'created_by', 'created_at']
+    list_filter = ['auto_sync', 'created_at']
+    search_fields = ['name', 'yapi_url']
+    raw_id_fields = ['project', 'created_by']
+
+
+@admin.register(YApiSyncLog)
+class YApiSyncLogAdmin(admin.ModelAdmin):
+    list_display = ['connection', 'status', 'total_interfaces', 'new_count', 'updated_count', 'skipped_count', 'created_at']
+    list_filter = ['status', 'created_at']
+    readonly_fields = ['created_at']
+

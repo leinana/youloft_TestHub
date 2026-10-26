@@ -316,10 +316,13 @@ const clearHistory = async () => {
       }
     )
 
-    // 这里需要后端提供批量删除接口
-    // 目前先用批量删除当前页的方式模拟，或者需要后端增加清空接口
-    // 暂时提示未实现
-    ElMessage.warning(t('apiTesting.history.clearNotImplemented'))
+    // 删除当前显示的所有记录
+    const data = activeTab.value === 'WebSocket' ? websocketHistory.value : httpHistory.value
+    const ids = data.map(h => h.id)
+    if (ids.length === 0) { ElMessage.warning('没有可删除的记录'); return }
+    await Promise.all(ids.map(id => api.delete(`/api-testing/request-histories/${id}/`)))
+    ElMessage.success(`已清空 ${ids.length} 条记录`)
+    await loadHistory()
   } catch (error) {
     if (error !== 'cancel') {
       console.error(error)

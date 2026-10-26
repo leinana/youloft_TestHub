@@ -90,6 +90,9 @@ class ApiRequest(models.Model):
     headers = models.JSONField(default=dict, verbose_name='请求头')
     params = models.JSONField(default=dict, verbose_name='URL参数')
     body = models.JSONField(default=dict, verbose_name='请求体')
+    res_body = models.JSONField(null=True, blank=True, verbose_name='响应体定义')
+    res_body_type = models.CharField(max_length=20, default='none', blank=True, verbose_name='响应体类型')
+    res_body_is_json_schema = models.BooleanField(default=False, verbose_name='响应体是否为JSON Schema')
     auth = models.JSONField(default=dict, verbose_name='认证信息')
     pre_request_script = models.TextField(blank=True, verbose_name='请求前脚本')
     post_request_script = models.TextField(blank=True, verbose_name='请求后脚本')
@@ -119,6 +122,8 @@ class Environment(models.Model):
     name = models.CharField(max_length=200, verbose_name='环境名称')
     scope = models.CharField(max_length=10, choices=SCOPE_CHOICES, verbose_name='作用域')
     variables = models.JSONField(default=dict, verbose_name='环境变量')
+    default_headers = models.JSONField(default=list, verbose_name='默认请求头')
+    default_params = models.JSONField(default=list, verbose_name='默认URL参数')
     is_active = models.BooleanField(default=False, verbose_name='是否激活')
     project = models.ForeignKey(ApiProject, on_delete=models.CASCADE, null=True, blank=True,
                                 related_name='environments', verbose_name='关联项目')
@@ -168,6 +173,7 @@ class TestSuite(models.Model):
     requests = models.ManyToManyField(ApiRequest, through='TestSuiteRequest', verbose_name='包含请求')
     environment = models.ForeignKey(Environment, on_delete=models.SET_NULL, null=True, blank=True,
                                     verbose_name='执行环境')
+    scenario_config = models.JSONField(default=dict, blank=True, verbose_name='可视化场景配置')
     created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='api_test_suites',
                                    verbose_name='创建者')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
@@ -636,3 +642,187 @@ class AIServiceConfig(models.Model):
 
     def __str__(self):
         return self.name
+
+
+# ===== YApi 集成 =====
+
+class YApiConnection(models.Model):
+    """YApi 项目连接配置"""
+    project = models.OneToOneField(
+        ApiProject, on_delete=models.CASCADE, related_name='yapi_connection',
+        verbose_name='关联项目'
+    )
+    name = models.CharField(max_length=200, verbose_name='连接名称')
+    yapi_url = models.CharField(max_length=500, verbose_name='YApi 地址')
+    yapi_token = models.CharField(max_length=500, verbose_name='YApi Token')
+    token_valid_days = models.IntegerField(default=7, verbose_name='Token 有效天数')
+    token_updated_at = models.DateTimeField(null=True, blank=True, verbose_name='Token 更新时间')
+    yapi_uid = models.IntegerField(default=0, verbose_name='YApi UID')
+    yapi_project_id = models.IntegerField(verbose_name='YApi 项目 ID')
+    auto_sync = models.BooleanField(default=False, verbose_name='自动同步')
+    last_synced_at = models.DateTimeField(null=True, blank=True, verbose_name='最近同步时间')
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE, verbose_name='创建者')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'yapi_connections'
+        verbose_name = 'YApi连接'
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f'{self.name} → ...'
+
+
+class ApiPromptConfig(models.Model):
+    """接口测试 AI 提示词配置"""
+    PROMPT_TYPE_CHOICES = [
+        ('api_testcase_writer', '用例生成提示词'),
+        ('api_test_execution', '接口测试执行提示词'),
+    ]
+    name = models.CharField(max_length=200, verbose_name='配置名称')
+    prompt_type = models.CharField(max_length=30, choices=PROMPT_TYPE_CHOICES, verbose_name='提示词类型')
+    content = models.TextField(verbose_name='提示词内容')
+    is_active = models.BooleanField(default=True, verbose_name='是否启用')
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE, verbose_name='创建者')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'api_prompt_configs'
+        verbose_name = '接口测试提示词配置'
+        verbose_name_plural = '接口测试提示词配置'
+        ordering = ['-is_active', '-updated_at']
+
+    def __str__(self):
+        return f'{self.get_prompt_type_display()} - {self.name}'
+
+
+class YApiSyncLog(models.Model):
+    """YApi 同步日志"""
+    connection = models.ForeignKey(
+        YApiConnection, on_delete=models.CASCADE, related_name='sync_logs',
+        verbose_name='连接'
+    )
+    status = models.CharField(max_length=20, choices=[
+        ('running', '同步中'), ('success', '成功'), ('failed', '失败')
+    ], default='running', verbose_name='状态')
+    total_interfaces = models.IntegerField(default=0, verbose_name='接口总数')
+    new_count = models.IntegerField(default=0, verbose_name='新增')
+    updated_count = models.IntegerField(default=0, verbose_name='更新')
+    skipped_count = models.IntegerField(default=0, verbose_name='跳过')
+    error_message = models.TextField(blank=True, verbose_name='错误信息')
+    detail = models.JSONField(default=dict, verbose_name='详情')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+
+    class Meta:
+        db_table = 'yapi_sync_logs'
+        verbose_name = 'YApi同步日志'
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f'同步 {self.created_at.strftime("%m-%d %H:%M")} [{self.get_status_display()}]'
+
+
+# ===== 参数分析 =====
+
+class ParameterAnalysis(models.Model):
+    """AI 接口参数分析结果"""
+    api_request = models.OneToOneField(
+        ApiRequest, on_delete=models.CASCADE, related_name='param_analysis',
+        verbose_name='接口'
+    )
+    analysis = models.JSONField(default=dict, verbose_name='分析结果')
+    confirmed = models.BooleanField(default=False, verbose_name='已人工确认')
+    confirmed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, verbose_name='确认人'
+    )
+    confirmed_at = models.DateTimeField(null=True, blank=True, verbose_name='确认时间')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'param_analyses'
+        verbose_name = '参数分析'
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f'{self.api_request.name} 参数分析'
+
+
+# ===== AI 生成的测试用例 =====
+
+class ApiGeneratedCase(models.Model):
+    """AI 根据参数分析生成的测试用例"""
+    api_request = models.ForeignKey(
+        ApiRequest, on_delete=models.CASCADE, related_name='generated_cases',
+        verbose_name='关联接口'
+    )
+    name = models.CharField(max_length=300, verbose_name='用例名称')
+    scenario = models.CharField(max_length=50, choices=[
+        ('normal', '正常场景'), ('boundary', '边界场景'), ('exception', '异常场景'),
+        ('biz', '业务场景'),
+    ], default='normal', verbose_name='场景类型')
+    priority = models.CharField(max_length=10, choices=[
+        ('P0', 'P0'), ('P1', 'P1'), ('P2', 'P2'), ('P3', 'P3'),
+    ], default='P2', verbose_name='优先级')
+
+    # 请求数据
+    method = models.CharField(max_length=10, default='GET', verbose_name='方法')
+    url = models.CharField(max_length=1000, blank=True, verbose_name='URL')
+    headers = models.JSONField(default=dict, verbose_name='请求头')
+    params = models.JSONField(default=dict, verbose_name='URL参数')
+    body = models.JSONField(default=dict, null=True, blank=True, verbose_name='请求体')
+
+    # 断言
+    assertions = models.JSONField(default=list, verbose_name='断言列表')
+    expected_status = models.IntegerField(null=True, blank=True, verbose_name='预期状态码')
+
+    # 状态
+    enabled = models.BooleanField(default=True, verbose_name='是否启用')
+    confirmed = models.BooleanField(default=False, verbose_name='已确认')
+    executed = models.BooleanField(default=False, verbose_name='已执行')
+    last_status = models.CharField(max_length=20, null=True, blank=True,
+        choices=[('pass', '通过'), ('fail', '失败'), ('error', '错误'), ('skip', '跳过')],
+        verbose_name='最近执行结果')
+    executed_at = models.DateTimeField(null=True, blank=True, verbose_name='最近执行时间')
+    response_time = models.IntegerField(null=True, blank=True, verbose_name='响应时间(ms)')
+    error_message = models.TextField(blank=True, verbose_name='错误信息')
+
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'api_generated_cases'
+        verbose_name = 'AI生成用例'
+        verbose_name_plural = verbose_name
+        ordering = ['api_request', 'scenario', 'priority']
+
+    def __str__(self):
+        return f'{self.name} [{self.get_scenario_display()}]'
+
+
+# ===== AI 提问澄清（参数分析后、生成用例前的人工确认环节） =====
+
+class ApiClarification(models.Model):
+    """AI 针对接口提出的澄清问题与人工确认答案"""
+    api_request = models.OneToOneField(
+        ApiRequest, on_delete=models.CASCADE, related_name='clarification',
+        verbose_name='关联接口'
+    )
+    questions = models.JSONField(default=list, verbose_name='澄清问题与答案')
+    clarified = models.BooleanField(default=False, verbose_name='是否已澄清确认')
+    clarified_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, verbose_name='确认人'
+    )
+    clarified_at = models.DateTimeField(null=True, blank=True, verbose_name='确认时间')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'api_clarifications'
+        verbose_name = '接口澄清'
+        verbose_name_plural = '接口澄清'
+
+    def __str__(self):
+        return f'{self.api_request.name} 澄清'

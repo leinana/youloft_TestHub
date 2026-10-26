@@ -243,6 +243,45 @@ class ApiCollectionViewSet(viewsets.ModelViewSet):
             )
         ).distinct()
 
+    @action(detail=False, methods=['get'], url_path='search')
+    def search(self, request):
+        """搜索接口（按名称/路径/方法模糊匹配），返回接口列表 + matchType（name/method/url）"""
+        keyword = (request.query_params.get('keyword') or '').strip()
+        project_id = request.query_params.get('project')
+        user = request.user
+        if not keyword:
+            return Response([])
+
+        accessible_projects = ApiProject.objects.filter(
+            models.Q(owner=user) | models.Q(members=user)
+        )
+        qs = ApiRequest.objects.select_related('param_analysis').filter(
+            models.Q(collection__project__in=accessible_projects) |
+            models.Q(collection__isnull=True, created_by=user)
+        ).distinct()
+        if project_id:
+            qs = qs.filter(
+                models.Q(collection__project_id=project_id) |
+                models.Q(collection__isnull=True, created_by=user)
+            ).distinct()
+
+        qs = qs.filter(
+            models.Q(name__icontains=keyword) |
+            models.Q(url__icontains=keyword) |
+            models.Q(method__icontains=keyword)
+        ).order_by('name')[:50]
+
+        data = ApiRequestSerializer(qs, many=True, context={'request': request}).data
+        kw_low = keyword.lower()
+        for item, obj in zip(data, qs):
+            if kw_low in (obj.name or '').lower():
+                item['matchType'] = 'name'
+            elif kw_low in (obj.method or '').lower():
+                item['matchType'] = 'method'
+            else:
+                item['matchType'] = 'url'
+        return Response(data)
+
     def perform_create(self, serializer):
         """创建集合时记录日志"""
         instance = serializer.save()
@@ -295,7 +334,7 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
         # 查询两种接口：
         # 1. 关联到集合的接口（集合所属项目是用户有权限的）
         # 2. 或者是用户创建的且没有关联集合的接口
-        queryset = ApiRequest.objects.filter(
+        queryset = ApiRequest.objects.select_related('param_analysis').filter(
             models.Q(
                 collection__project__in=accessible_projects
             ) | models.Q(
@@ -361,10 +400,14 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
 
             # 解析环境变量
             variables = {}
+            default_env_headers = []
+            default_env_params = []
             if environment_id:
                 env = Environment.objects.get(id=environment_id)
                 variables.update(env.variables)
-            
+                default_env_headers = env.default_headers or []
+                default_env_params = env.default_params or []
+
             # 使用前端发送的更新后的数据，如果没有则使用数据库中的数据
             request_params = request.data.get('params', api_request.params)
             request_headers = request.data.get('headers', api_request.headers)
@@ -372,10 +415,56 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
             request_method = request.data.get('method', api_request.method)
             request_url = request.data.get('url', api_request.url)
 
+            # 合并环境默认 params（请求级 params 优先级更高）
+            if default_env_params:
+                if isinstance(request_params, dict):
+                    for dp in default_env_params:
+                        key = dp.get('key', '')
+                        if key and key not in request_params:
+                            request_params[key] = dp.get('value', '')
+                elif isinstance(request_params, list):
+                    req_keys = {p.get('key','') for p in request_params if p.get('key')}
+                    for dp in default_env_params:
+                        if dp.get('key') and dp.get('key') not in req_keys:
+                            request_params.append({**dp, '_from_env': True})
+
+            # 合并环境默认 headers（请求级 headers 优先级更高）
+            if default_env_headers:
+                if isinstance(request_headers, list):
+                    req_keys = {h.get('key','') for h in request_headers if h.get('key')}
+                    for dh in default_env_headers:
+                        if dh.get('key') and dh.get('key') not in req_keys:
+                            request_headers.append({**dh, '_from_env': True})
+                else:
+                    merged = {}
+                    for dh in default_env_headers:
+                        if dh.get('key'):
+                            merged[dh['key']] = dh.get('value', '')
+                    merged.update(request_headers or {})
+                    request_headers = merged
+
             # 替换URL中的变量（先解析动态函数，再替换环境变量）
             url = self._replace_variables(request_url or '', variables)
             url = resolver.resolve(url)
-            
+
+            # 相对路径补全 base_url（兼容 YApi 同步的裸路径，如 /diary/v2/edit）
+            if not url.startswith(('http://', 'https://', '//')):
+                base_url = str(variables.get('base_url') or '').rstrip('/')
+                if not base_url:
+                    try:
+                        from .models import Environment as _Env
+                        _proj = api_request.collection.project if api_request.collection else None
+                        _env = None
+                        if _proj:
+                            _env = _Env.objects.filter(project=_proj, is_active=True).first()
+                        if _env is None:
+                            _env = _Env.objects.filter(is_active=True).first()
+                        base_url = str((_env.variables or {}).get('base_url') or '').rstrip('/') if _env else ''
+                    except Exception:
+                        base_url = ''
+                if base_url:
+                    url = base_url + (url if url.startswith('/') else '/' + url)
+
             # 准备请求头
             headers = {}
             if isinstance(request_headers, list):
@@ -425,6 +514,18 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
                 else:
                     body_data = body_content
             
+            # 解析真实数据（环境变量 → 历史响应 → 上游接口），支持 {{上游接口.响应路径}} 自动取数
+            try:
+                from .case_views import _resolve_real_data, _resolve_real_data_in_obj
+                _proj = api_request.collection.project if api_request.collection else None
+                if isinstance(params, dict):
+                    params, _ = _resolve_real_data(params, variables, _proj, {})
+                if isinstance(body_data, (dict, list)):
+                    _miss = []
+                    body_data = _resolve_real_data_in_obj(body_data, variables, _proj, {}, 0, _miss)
+            except Exception:
+                pass
+
             # 执行请求
             start_time = time.time()
 
@@ -708,7 +809,8 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
             # 创建变量解析器
             resolver = VariableResolver()
 
-            # 执行每个请求
+            # 执行每个请求（上游取值缓存跨步骤共享，避免同一上游被重复调用）
+            upstream_cache = {}
             for suite_request in suite_requests:
                 api_request = suite_request.request
                 
@@ -717,10 +819,34 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
                     variables = {}
                     if test_suite.environment:
                         variables.update(test_suite.environment.variables)
-                    
+
+                    # 合并环境默认请求头/参数（并纳入变量表，便于 {{userid}} 等解析）
+                    default_headers = [h for h in ((test_suite.environment.default_headers if test_suite.environment else None) or []) if h.get('enabled', True)]
+                    default_params = [p for p in ((test_suite.environment.default_params if test_suite.environment else None) or []) if p.get('enabled', True)]
+                    for dp in default_params:
+                        if dp.get('key') and dp.get('key') not in variables:
+                            variables[dp['key']] = dp.get('value', '')
+
                     # 替换URL中的变量（先解析动态函数，再替换环境变量）
                     url = self._replace_variables(api_request.url, variables)
                     url = resolver.resolve(url)
+                    # 相对路径补全 base_url
+                    if not url.startswith(('http://', 'https://', '//')):
+                        _base = str(variables.get('base_url') or '').rstrip('/')
+                        if not _base:
+                            try:
+                                from .models import Environment as _Env
+                                _proj = api_request.collection.project if api_request.collection else None
+                                _env0 = None
+                                if _proj:
+                                    _env0 = _Env.objects.filter(project=_proj, is_active=True).first()
+                                if _env0 is None:
+                                    _env0 = _Env.objects.filter(is_active=True).first()
+                                _base = str((_env0.variables or {}).get('base_url') or '').rstrip('/') if _env0 else ''
+                            except Exception:
+                                _base = ''
+                        if _base:
+                            url = _base + (url if url.startswith('/') else '/' + url)
 
                     # 准备请求头
                     headers = {}
@@ -740,7 +866,19 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
                             headers[key] = self._replace_variables(str(value), variables)
                             headers[key] = resolver.resolve(headers[key])
 
-                    params = api_request.params.copy()
+                    # 合并环境默认请求头（接口已有 key 优先）
+                    for h in default_headers:
+                        k = h.get('key')
+                        if k and k not in headers:
+                            headers[k] = self._replace_variables(str(h.get('value', '')), variables)
+                            headers[k] = resolver.resolve(headers[k])
+
+                    params = api_request.params.copy() if isinstance(api_request.params, dict) else {}
+                    # 合并环境默认参数（接口已有 key 优先；接口里的空值视为未设置）
+                    for dp in default_params:
+                        k = dp.get('key')
+                        if k and (k not in params or params[k] in ('', None)):
+                            params[k] = dp.get('value', '')
                     for key, value in params.items():
                         params[key] = self._replace_variables(str(value), variables)
                         params[key] = resolver.resolve(params[key])
@@ -751,6 +889,18 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
                             body_data = api_request.body.get('data', {})
                             body_data = self._replace_variables_in_dict(body_data, variables)
                             body_data = self._resolve_variables_in_dict(body_data, resolver)
+
+                    # 解析真实数据（环境变量 → 历史响应 → 上游接口），支持 {{上游接口.路径}}
+                    try:
+                        from .case_views import _resolve_real_data, _resolve_real_data_in_obj
+                        _proj = api_request.collection.project if api_request.collection else None
+                        if isinstance(params, dict):
+                            params, _ = _resolve_real_data(params, variables, _proj, upstream_cache)
+                        if isinstance(body_data, (dict, list)):
+                            _miss = []
+                            body_data = _resolve_real_data_in_obj(body_data, variables, _proj, upstream_cache, 0, _miss)
+                    except Exception:
+                        pass
 
                     # 执行请求
                     start_time = time.time()
@@ -2201,7 +2351,7 @@ class ScheduledTaskViewSet(viewsets.ModelViewSet):
                         sent_at=timezone.now(),
                         response_info={
                             'status_code': response.status_code,
-                            'response_text': response.text[:500]
+                            'response_text': response.text[:50000]
                         }
                     )
 

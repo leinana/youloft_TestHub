@@ -537,21 +537,30 @@ const loadEnvironments = async () => {
   }
 }
 
+// 分页接口全量加载（后端 PAGE_SIZE=20，需循环拉取所有页，避免新接口不显示）
+const fetchAllPages = async (url, params = {}) => {
+  let all = []
+  let page = 1
+  while (true) {
+    const response = await api.get(url, { params: { ...params, page } })
+    const data = response.data || {}
+    const items = data.results || (Array.isArray(data) ? data : [])
+    all = all.concat(items)
+    if (!data.next) break
+    page += 1
+  }
+  return all
+}
+
 const loadRequestTree = async () => {
   if (!selectedProject.value) return
 
   try {
-    // 加载集合
-    const collectionsRes = await api.get('/api-testing/collections/', {
-      params: { project: selectedProject.value }
-    })
-    const collections = collectionsRes.data.results || collectionsRes.data
+    // 加载集合（全量分页）
+    const collections = await fetchAllPages('/api-testing/collections/', { project: selectedProject.value })
 
-    // 加载请求，传递project参数
-    const requestsRes = await api.get('/api-testing/requests/', {
-      params: { project: selectedProject.value }
-    })
-    const requests = requestsRes.data.results || requestsRes.data
+    // 加载请求（全量分页，传递 project 参数）
+    const requests = await fetchAllPages('/api-testing/requests/', { project: selectedProject.value })
 
     // 构建树形结构
     requestTree.value = buildRequestTree(collections, requests)

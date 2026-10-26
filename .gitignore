@@ -23,6 +23,7 @@ static_files/img/
 apps/*/migrations/*
 # 使用否定模式，例外地跟踪 __init__.py 文件
 !apps/*/migrations/__init__.py
+!apps/api_testing/migrations/0014_testsuite_scenario_config.py
 
 # 忽略 allure-static 下的所有文件（运行时生成）
 media/allure-static/*

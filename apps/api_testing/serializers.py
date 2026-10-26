@@ -14,6 +14,7 @@ class NullableDateField(serializers.DateField):
         return super().to_internal_value(value)
 from .models import (
     ApiProject, ApiCollection, ApiRequest, Environment,
+    ApiPromptConfig,
     RequestHistory, TestSuite, TestExecution, TestSuiteRequest,
     ScheduledTask, TaskExecutionLog, NotificationLog,
     TaskNotificationSetting, OperationLog, AIServiceConfig,
@@ -97,6 +98,19 @@ class ApiRequestSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True
     )
+    confirmed = serializers.SerializerMethodField()
+    confirmed_at = serializers.SerializerMethodField()
+
+    def get_confirmed(self, obj):
+        pa = getattr(obj, 'param_analysis', None)
+        return bool(pa and pa.confirmed)
+
+    def get_confirmed_at(self, obj):
+        pa = getattr(obj, 'param_analysis', None)
+        if not pa or not pa.confirmed:
+            return None
+        # 历史数据可能没有 confirmed_at，回退到更新时间保证可排序
+        return pa.confirmed_at or pa.updated_at
 
     class Meta:
         model = ApiRequest
@@ -104,6 +118,8 @@ class ApiRequestSerializer(serializers.ModelSerializer):
             'id', 'name', 'description', 'request_type', 'method', 'url',
             'headers', 'params', 'body', 'auth', 'pre_request_script',
             'post_request_script', 'assertions', 'collection', 'order', 'created_by',
+            'res_body', 'res_body_type', 'res_body_is_json_schema',
+            'confirmed', 'confirmed_at',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']
@@ -134,7 +150,7 @@ class EnvironmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Environment
         fields = [
-            'id', 'name', 'scope', 'project', 'project_name', 'variables', 'is_active',
+            'id', 'name', 'scope', 'project', 'project_name', 'variables', 'default_headers', 'default_params', 'is_active',
             'created_by', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at', 'created_by', 'project_name']
@@ -185,7 +201,7 @@ class TestSuiteSerializer(serializers.ModelSerializer):
         model = TestSuite
         fields = [
             'id', 'name', 'description', 'project', 'environment',
-            'suite_requests', 'created_by', 'created_at', 'updated_at'
+            'scenario_config', 'suite_requests', 'created_by', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']
 
@@ -824,3 +840,95 @@ class AIServiceConfigSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         validated_data['created_by'] = self.context['request'].user
         return super().create(validated_data)
+
+# ===== YApi 集成 =====
+from .models import YApiConnection, YApiSyncLog
+
+
+def _clean_yapi_token(value):
+    """清洗 YApi token：兼容直接粘贴完整 cookie（_yapi_token=xxx; ...）"""
+    if not value:
+        return value
+    v = str(value).strip().strip('"').strip("'")
+    for prefix in ('_yapi_token=', 'yapi_token='):
+        if v.startswith(prefix):
+            v = v[len(prefix):]
+            break
+    if ';' in v:
+        v = v.split(';')[0]
+    return v.strip()
+
+
+class YApiConnectionSerializer(serializers.ModelSerializer):
+    project_name = serializers.CharField(source='project.name', read_only=True)
+    last_sync_status = serializers.SerializerMethodField()
+    token_remaining_days = serializers.SerializerMethodField()
+    token_status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = YApiConnection
+        fields = [
+            'id', 'name', 'project', 'project_name', 'yapi_url', 'yapi_token',
+            'yapi_uid', 'yapi_project_id', 'auto_sync', 'last_synced_at', 'last_sync_status',
+            'token_valid_days', 'token_updated_at', 'token_remaining_days', 'token_status',
+            'created_by', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['created_at', 'updated_at', 'created_by', 'last_sync_status',
+                            'token_updated_at', 'token_remaining_days', 'token_status']
+        extra_kwargs = {'yapi_token': {'write_only': True, 'required': False}}
+
+    def validate(self, attrs):
+        if self.instance is None and not attrs.get('yapi_token'):
+            raise serializers.ValidationError({'yapi_token': 'YApi Token 为必填项'})
+        return attrs
+
+    def get_last_sync_status(self, obj):
+        last_log = obj.sync_logs.first()
+        return last_log.status if last_log else None
+
+    def get_token_remaining_days(self, obj):
+        if not obj.token_updated_at:
+            return None
+        from datetime import timedelta
+        expire = obj.token_updated_at + timedelta(days=obj.token_valid_days or 7)
+        # 实际剩余天数（保留 1 位小数），不向上取整
+        return round((expire - timezone.now()).total_seconds() / 86400.0, 1)
+
+    def get_token_status(self, obj):
+        days = self.get_token_remaining_days(obj)
+        if days is None:
+            return 'unknown'
+        return 'valid' if days >= 0 else 'expired'
+
+    def create(self, validated_data):
+        if validated_data.get('yapi_token'):
+            validated_data['yapi_token'] = _clean_yapi_token(validated_data['yapi_token'])
+            validated_data['token_updated_at'] = timezone.now()
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        # 传入新 token 时清洗并重置有效期起点
+        if validated_data.get('yapi_token'):
+            validated_data['yapi_token'] = _clean_yapi_token(validated_data['yapi_token'])
+            validated_data['token_updated_at'] = timezone.now()
+        return super().update(instance, validated_data)
+
+
+class YApiSyncLogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = YApiSyncLog
+        fields = [
+            'id', 'connection', 'status', 'total_interfaces', 'new_count',
+            'updated_count', 'skipped_count', 'error_message', 'detail', 'created_at',
+        ]
+
+
+class ApiPromptConfigSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.CharField(source='created_by.username', read_only=True)
+    prompt_type_display = serializers.CharField(source='get_prompt_type_display', read_only=True)
+
+    class Meta:
+        model = ApiPromptConfig
+        fields = ['id', 'name', 'prompt_type', 'prompt_type_display', 'content', 'is_active',
+                  'created_by', 'created_by_name', 'created_at', 'updated_at']
+        read_only_fields = ['created_by', 'created_at', 'updated_at']

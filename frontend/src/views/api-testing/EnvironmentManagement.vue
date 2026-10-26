@@ -330,7 +330,7 @@ const editEnvironment = (environment) => {
   const variables = environment.variables || {}
   form.variables = Object.keys(variables).map(key => {
     const value = variables[key]
-    if (typeof value === 'object') {
+    if (typeof value === 'object' && value !== null) {
       return {
         key,
         initialValue: value.initialValue || '',
@@ -339,8 +339,8 @@ const editEnvironment = (environment) => {
     } else {
       return {
         key,
-        initialValue: value || '',
-        currentValue: value || ''
+        initialValue: value == null ? '' : String(value),
+        currentValue: value == null ? '' : String(value)
       }
     }
   })

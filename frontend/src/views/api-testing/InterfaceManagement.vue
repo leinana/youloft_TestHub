@@ -41,7 +41,9 @@
             :data="collections"
             :props="treeProps"
             node-key="id"
-            :expand-on-click-node="false"
+            highlight-current
+            :current-node-key="displayNodeKey"
+            :expand-on-click-node="true"
             :default-expanded-keys="expandedKeys"
             @node-click="onNodeClick"
             @node-contextmenu="onNodeRightClick"
@@ -78,9 +80,10 @@
               </div>
             </template>
           </el-tree>
+        </div>
 
-          <!-- 搜索结果 -->
-          <div v-if="filteredCollections.length > 0" class="search-results">
+        <!-- 搜索结果 -->
+        <div v-if="filteredCollections.length > 0" class="search-results">
             <div class="search-results-header">
               <span>{{ $t('apiTesting.interface.searchResults', { count: filteredCollections.length }) }}</span>
               <el-button size="small" text @click="clearSearch">
@@ -105,7 +108,6 @@
               </div>
             </div>
           </div>
-        </div>
       </div>
 
       <!-- 右侧请求详情 -->
@@ -143,7 +145,7 @@
                 class="url-input"
               >
                 <template #prepend>
-                  <el-select v-model="selectedEnvironment" :placeholder="$t('apiTesting.interface.environment')" class="env-select">
+                  <el-select v-model="selectedEnvironment" :placeholder="$t('apiTesting.interface.environment')" class="env-select" @change="onEnvironmentChange">
                     <el-option :label="$t('apiTesting.common.noEnvironment')" :value="null" />
                     <el-option
                       v-for="env in environments"
@@ -152,6 +154,16 @@
                       :value="env.id"
                     />
                   </el-select>
+                  <el-button
+                    v-if="selectedEnvironment"
+                    class="env-headers-btn"
+                    @click="openEnvHeadersDialog"
+                    :title="$t('apiTesting.interface.editEnvHeaders')"
+                    size="small"
+                    circle
+                  >
+                    <el-icon><Setting /></el-icon>
+                  </el-button>
                 </template>
               </el-input>
 
@@ -299,6 +311,17 @@
                     class="raw-body"
                   />
                 </div>
+              </div>
+            </el-tab-pane>
+
+            <el-tab-pane label="Response" name="response">
+              <div class="response-viewer">
+                <div class="response-meta">
+                  <span class="resp-type-tag">{{ selectedRequest.res_body_type || 'none' }}</span>
+                  <span v-if="selectedRequest.res_body_is_json_schema" class="resp-schema-tag">JSON Schema</span>
+                  <span v-if="!formattedResBody" class="resp-empty">暂无响应定义（YApi 同步后自动导入）</span>
+                </div>
+                <pre v-if="formattedResBody" class="response-pre">{{ formattedResBody }}</pre>
               </div>
             </el-tab-pane>
 
@@ -697,6 +720,14 @@
                     <div v-if="jsonPathResult !== null" class="jsonpath-result">
                       <strong>{{ $t('apiTesting.interface.extractResult') }}</strong>
                       <pre>{{ jsonPathResult }}</pre>
+                      <div class="jsonpath-save-env" v-if="selectedEnvironment && jsonPathResult !== null && jsonPathResult !== undefined">
+                        <el-input v-model="jsonPathVarName" placeholder="变量名" size="small" style="width:140px" />
+                        <el-button size="small" type="success" @click="saveJsonPathToEnv" :loading="savingJsonPathVar">存入环境</el-button>
+                      </div>
+                    </div>
+                    <div v-if="selectedEnvironment && responseBody" class="jsonpath-save-all">
+                      <el-button size="small" type="primary" @click="saveAllToEnv" :loading="savingAllToEnv">一键全部存入环境</el-button>
+                      <span style="font-size:12px;color:#909399;margin-left:8px">把响应 JSON 第一层字段全部存为变量</span>
                     </div>
                   </div>
                   <div class="response-content" v-html="highlightedResponseBody"></div>
@@ -926,13 +957,63 @@
         <el-button type="primary" @click="copyGeneratedCode">{{ $t('apiTesting.common.copy') }}</el-button>
       </template>
     </el-dialog>
+
+    <!-- 环境配置编辑弹窗（默认Headers + 默认URL参数） -->
+    <el-dialog
+      v-model="envHeadersDialogVisible"
+      :title="'环境配置 - ' + (selectedEnvObj?.name || '')"
+      width="920px"
+      :close-on-click-modal="false"
+    >
+      <el-tabs v-model="envConfigTab">
+        <el-tab-pane label="默认 Headers" name="headers">
+          <el-alert
+            title="所有接口发送时自动带上这些 Headers，接口级同 Key 可覆盖"
+            type="info" :closable="false" show-icon style="margin-bottom: 12px"
+          />
+          <div class="env-kv-list">
+            <div v-for="(h, index) in editingEnvHeaders" :key="'h'+index" class="env-kv-row">
+              <el-checkbox v-model="h.enabled" />
+              <el-input v-model="h.key" placeholder="Header名称" size="small" style="width:160px" />
+              <el-input v-model="h.value" placeholder="Header值" size="small" style="flex:1;min-width:150px" />
+              <el-input v-model="h.description" placeholder="备注" size="small" style="width:100px" />
+              <el-button type="danger" :icon="Delete" circle size="small" @click="editingEnvHeaders.splice(index,1)" />
+            </div>
+          </div>
+          <el-button type="primary" size="small" @click="editingEnvHeaders.push({key:'',value:'',enabled:true,description:''})">+ 添加Header</el-button>
+        </el-tab-pane>
+
+        <el-tab-pane label="默认 URL 参数" name="params">
+          <el-alert
+            title="所有接口发送时自动带上这些 URL 参数；勾选「需真实」并填数据来源（字段名 或 上游接口名.响应路径）的参数，执行时优先用真实值覆盖"
+            type="info" :closable="false" show-icon style="margin-bottom: 12px"
+          />
+          <div class="env-kv-list">
+            <div v-for="(p, index) in editingEnvParams" :key="'p'+index" class="env-kv-row">
+              <el-checkbox v-model="p.enabled" title="启用" />
+              <el-input v-model="p.key" placeholder="参数名" size="small" style="width:120px" />
+              <el-input v-model="p.value" placeholder="参数值" size="small" style="flex:1;min-width:110px" />
+              <el-checkbox v-model="p.needs_real_data" title="该参数需要真实有效数据，执行时优先用真实值覆盖">需真实</el-checkbox>
+              <el-input v-model="p.data_source" placeholder="数据来源" size="small" style="width:150px" title="字段名 或 上游接口名.响应路径" />
+              <el-input v-model="p.description" placeholder="备注" size="small" style="width:70px" />
+              <el-button type="danger" :icon="Delete" circle size="small" @click="editingEnvParams.splice(index,1)" />
+            </div>
+          </div>
+          <el-button type="primary" size="small" @click="editingEnvParams.push({key:'',value:'',enabled:true,description:'',needs_real_data:false,data_source:''})">+ 添加参数</el-button>
+        </el-tab-pane>
+      </el-tabs>
+      <template #footer>
+        <el-button @click="envHeadersDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveEnvHeaders" :loading="savingEnvHeaders">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Folder, Document, MagicStick, Search, Close } from '@element-plus/icons-vue'
+import { Plus, Folder, Document, MagicStick, Search, Close, Setting, Delete } from '@element-plus/icons-vue'
 import api from '@/utils/api'
 import KeyValueEditor from './components/KeyValueEditor.vue'
 import DataFactorySelector from '@/components/DataFactorySelector.vue'
@@ -952,6 +1033,12 @@ const collections = ref([])
 const flatCollections = ref([])
 const environments = ref([])
 const selectedEnvironment = ref(null)
+const selectedEnvObj = ref(null)
+const envHeadersDialogVisible = ref(false)
+const envConfigTab = ref('headers')
+const editingEnvHeaders = ref([])
+const editingEnvParams = ref([])
+const savingEnvHeaders = ref(false)
 const selectedRequest = ref(null)
 const response = ref(null)
 const sending = ref(false)
@@ -964,6 +1051,11 @@ const showContextMenu = ref(false)
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
 const rightClickedNode = ref(null)
+const currentNodeKey = ref(null)
+const currentNodeParentCollectionId = ref(null)  // 当前选中请求所属的集合ID
+
+// 实际高亮的节点（由 onNodeClick / onNodeExpand / onNodeCollapse 直接控制）
+const displayNodeKey = ref(null)
 const headersEditorRef = ref(null)
 const editingNodeId = ref(null)
 const editingNodeName = ref('')
@@ -1012,6 +1104,9 @@ const websocketBinaryFile = ref(null)
 const showJsonPathExtractor = ref(false)
 const jsonPathExpression = ref('')
 const jsonPathResult = ref(null)
+const jsonPathVarName = ref('')
+const savingJsonPathVar = ref(false)
+const savingAllToEnv = ref(false)
 
 // Body相关
 const bodyType = ref('none')
@@ -1021,6 +1116,14 @@ const formUrlEncoded = ref([])
 const rawBody = ref('')
 
 const availableMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'CONNECT', 'TRACE']
+
+// 响应体展示：JSON 格式化，纯文本原样显示
+const formattedResBody = computed(() => {
+  const rb = selectedRequest.value?.res_body
+  if (rb === null || rb === undefined || rb === '') return ''
+  if (typeof rb === 'string') return rb
+  return JSON.stringify(rb, null, 2)
+})
 
 const onSearchDebounced = debounce((value) => {
   onSearch(value)
@@ -1047,10 +1150,37 @@ const onSearch = async (value) => {
   }
 }
 
+// 在树中查找请求节点，返回从根到其所属集合的集合 id 路径（未找到返回 null）
+const findRequestPath = (nodes, requestId, path = []) => {
+  for (const node of nodes) {
+    if (node.type === 'request') {
+      if (node.id === requestId) return path
+    } else if (node.children && node.children.length) {
+      const found = findRequestPath(node.children, requestId, [...path, node.id])
+      if (found) return found
+    }
+  }
+  return null
+}
+
 const selectSearchResult = (item) => {
   selectedRequest.value = item
   searchKeyword.value = ''
   filteredCollections.value = []
+
+  // 在左侧树中定位该接口：展开所属集合（含嵌套父集合）并高亮选中
+  const parentPath = findRequestPath(collections.value, item.id)
+  if (parentPath) {
+    const newKeys = Array.from(new Set([...expandedKeys.value, ...parentPath]))
+    expandedKeys.value = newKeys
+    currentNodeKey.value = item.id
+    currentNodeParentCollectionId.value = parentPath.length ? parentPath[parentPath.length - 1] : null
+    displayNodeKey.value = item.id
+    nextTick(() => {
+      treeRef.value?.setExpandedKeys(newKeys)
+      treeRef.value?.setCurrentKey(item.id)
+    })
+  }
 }
 
 const onProjectChange = async (projectId) => {
@@ -1065,11 +1195,24 @@ const onProjectChange = async (projectId) => {
   }
 }
 
+// 分页接口全量加载：后端使用 PageNumberPagination（PAGE_SIZE=20），需循环拉取所有页，避免列表被截断
+const fetchAllPages = async (url, params = {}) => {
+  let all = []
+  let page = 1
+  while (true) {
+    const response = await api.get(url, { params: { ...params, page } })
+    const data = response.data || {}
+    const items = data.results || (Array.isArray(data) ? data : [])
+    all = all.concat(items)
+    if (!data.next) break
+    page += 1
+  }
+  return all
+}
+
 const loadProjects = async () => {
   try {
-    const response = await api.get('/api-testing/projects/')
-    // 后端可能返回分页格式 { results: [...] } 或直接返回数组
-    projects.value = response.data.results || response.data || []
+    projects.value = await fetchAllPages('/api-testing/projects/')
     if (projects.value.length > 0) {
       selectedProject.value = projects.value[0].id
       await loadCollections(selectedProject.value)
@@ -1083,13 +1226,7 @@ const loadProjects = async () => {
 
 const loadCollections = async (projectId) => {
   try {
-    const response = await api.get('/api-testing/collections/', {
-      params: {
-        project: projectId
-      }
-    })
-    // 后端可能返回分页格式 { results: [...] } 或直接返回数组
-    const collectionsData = response.data.results || response.data || []
+    const collectionsData = await fetchAllPages('/api-testing/collections/', { project: projectId })
 
     // 构建树形结构
     collections.value = buildTree(collectionsData)
@@ -1105,16 +1242,65 @@ const loadCollections = async (projectId) => {
 
 const loadEnvironments = async (projectId) => {
   try {
-    const response = await api.get('/api-testing/environments/', {
-      params: {
-        project: projectId
-      }
-    })
-    // 后端可能返回分页格式 { results: [...] } 或直接返回数组
-    environments.value = response.data.results || response.data || []
+    environments.value = await fetchAllPages('/api-testing/environments/', { project: projectId })
+    // 默认选中第一个可用环境
+    if (!selectedEnvironment.value && environments.value.length > 0) {
+      selectedEnvironment.value = environments.value[0].id
+    }
+    // 同步已选环境对象
+    if (selectedEnvironment.value) {
+      selectedEnvObj.value = environments.value.find(e => e.id === selectedEnvironment.value) || null
+    }
   } catch (error) {
     ElMessage.error('加载环境失败')
     console.error('加载环境失败:', error)
+  }
+}
+
+const onEnvironmentChange = (envId) => {
+  selectedEnvObj.value = environments.value.find(e => e.id === envId) || null
+}
+
+const openEnvHeadersDialog = () => {
+  if (!selectedEnvObj.value) return
+  editingEnvHeaders.value = JSON.parse(JSON.stringify(
+    selectedEnvObj.value.default_headers || []
+  ))
+  editingEnvParams.value = JSON.parse(JSON.stringify(
+    selectedEnvObj.value.default_params || []
+  ))
+  envConfigTab.value = 'headers'
+  envHeadersDialogVisible.value = true
+}
+
+const saveEnvHeaders = async () => {
+  if (!selectedEnvObj.value) return
+  savingEnvHeaders.value = true
+  try {
+    const cleanHeaders = editingEnvHeaders.value
+      .filter(h => h.key.trim())
+      .map(h => ({ ...h, key: h.key.trim() }))
+    const cleanParams = editingEnvParams.value
+      .filter(p => p.key.trim())
+      .map(p => ({ ...p, key: p.key.trim() }))
+    await api.put(`/api-testing/environments/${selectedEnvObj.value.id}/`, {
+      ...selectedEnvObj.value,
+      default_headers: cleanHeaders,
+      default_params: cleanParams
+    })
+    selectedEnvObj.value.default_headers = cleanHeaders
+    selectedEnvObj.value.default_params = cleanParams
+    const idx = environments.value.findIndex(e => e.id === selectedEnvObj.value.id)
+    if (idx >= 0) {
+      environments.value[idx].default_headers = cleanHeaders
+      environments.value[idx].default_params = cleanParams
+    }
+    envHeadersDialogVisible.value = false
+    ElMessage.success('环境配置已保存')
+  } catch (error) {
+    ElMessage.error('保存失败: ' + (error.response?.data?.error || error.message))
+  } finally {
+    savingEnvHeaders.value = false
   }
 }
 
@@ -1165,8 +1351,8 @@ const loadRequests = async () => {
   if (!selectedProject.value) return
 
   try {
-    const response = await api.get('/api-testing/requests/')
-    const requests = response.data.results || response.data || []
+    // 全量拉取当前项目下的接口（分页循环），避免接口超过 PAGE_SIZE 时被截断
+    const requests = await fetchAllPages('/api-testing/requests/', { project: selectedProject.value })
 
     // 清空所有集合的子节点（请求）
     collections.value.forEach(collection => {
@@ -1218,7 +1404,21 @@ const flattenCollections = (items, parent = null) => {
 }
 
 const onNodeClick = async (data) => {
+  if (data.type === 'collection') {
+    rightClickedNode.value = data
+    currentNodeKey.value = data.id
+    currentNodeParentCollectionId.value = null
+    displayNodeKey.value = data.id
+    return
+  }
   if (data.type === 'request') {
+    currentNodeKey.value = data.id
+    currentNodeParentCollectionId.value = data.collection || null
+    const parentExpanded = currentNodeParentCollectionId.value
+      && expandedKeys.value.includes(currentNodeParentCollectionId.value)
+    const key = parentExpanded ? data.id : currentNodeParentCollectionId.value
+    displayNodeKey.value = key
+    nextTick(() => treeRef.value?.setCurrentKey(key))
     try {
       const apiResponse = await api.get(`/api-testing/requests/${data.id}/`)
       const requestData = apiResponse.data
@@ -1305,11 +1505,23 @@ const onNodeRightClick = (event, node, treeNode) => {
 }
 
 const onNodeExpand = (node) => {
-  expandedKeys.value.push(node.id)
+  if (!expandedKeys.value.includes(node.id)) {
+    expandedKeys.value.push(node.id)
+  }
+  // 展开时恢复高亮到子请求
+  if (currentNodeParentCollectionId.value === node.id && currentNodeKey.value) {
+    displayNodeKey.value = currentNodeKey.value
+    nextTick(() => treeRef.value?.setCurrentKey(currentNodeKey.value))
+  }
 }
 
 const onNodeCollapse = (node) => {
   expandedKeys.value = expandedKeys.value.filter(key => key !== node.id)
+  // 收起时如果选中的请求在这个集合下，高亮集合
+  if (currentNodeParentCollectionId.value === node.id) {
+    displayNodeKey.value = node.id
+    nextTick(() => treeRef.value?.setCurrentKey(node.id))
+  }
 }
 
 const createEmptyRequest = () => {
@@ -1318,13 +1530,20 @@ const createEmptyRequest = () => {
     return
   }
 
+  // 如果选中了集合，自动关联到该集合下
+  const collectionId = (rightClickedNode.value?.type === 'collection')
+    ? rightClickedNode.value.id
+    : null
+
   const newRequest = {
     id: null,
-    collection: null,
+    collection: collectionId,
     name: '未命名接口',
     url: '',
     method: 'GET',
-    params: {},
+    params: (selectedEnvObj.value?.default_params || []).filter(p => p.enabled !== false).map(p => ({
+      enabled: true, key: p.key, value: p.value || '', description: p.description || '', type: 'text'
+    })),
     headers: {},
     pre_request_script: '',
     post_request_script: '',
@@ -1333,6 +1552,16 @@ const createEmptyRequest = () => {
   }
 
   selectedRequest.value = newRequest
+  // 清空响应区，避免带上之前接口的返回
+  response.value = null
+  // 清空请求体编辑器，避免带上之前接口的 body
+  bodyType.value = 'none'
+  rawType.value = 'text'
+  formData.value = []
+  formUrlEncoded.value = []
+  rawBody.value = ''
+  // 清除之前选中的集合高亮，避免误操作
+  // rightClickedNode.value = null
 }
 
 const openCreateCollectionDialog = () => {
@@ -1473,8 +1702,11 @@ const saveCollectionName = async () => {
   }
 
   try {
+    // PUT 需要 project 字段，从 flatCollections 中获取
+    const collection = flatCollections.value.find(c => c.id === editingNodeId.value)
     await api.put(`/api-testing/collections/${editingNodeId.value}/`, {
-      name: editingNodeName.value.trim()
+      name: editingNodeName.value.trim(),
+      project: collection?.project || selectedProject.value
     })
     ElMessage.success('保存成功')
     await loadCollections(selectedProject.value)
@@ -1573,11 +1805,19 @@ const responseBody = computed(() => {
   if (!response.value || !response.value.response_data) return ''
 
   try {
+    // 优先用后端已解析的 JSON
     if (response.value.response_data.json) {
       return JSON.stringify(response.value.response_data.json, null, 2)
-    } else {
-      return response.value.response_data.body || ''
     }
+    // 尝试自动解析 body 文本为 JSON 并格式化
+    const body = response.value.response_data.body || ''
+    if (body && (body.trim().startsWith('{') || body.trim().startsWith('['))) {
+      try {
+        const parsed = JSON.parse(body)
+        return JSON.stringify(parsed, null, 2)
+      } catch (_) { /* not valid JSON, return raw */ }
+    }
+    return body
   } catch (e) {
     return response.value.response_data?.body || ''
   }
@@ -1603,12 +1843,12 @@ const highlightedResponseBody = computed(() => {
   if (!responseBody.value) return ''
 
   try {
-    // 简单的 JSON 语法高亮
+    // JSON 语法高亮
     return responseBody.value
-      .replace(/"([^"]+)"\s*:/g, '<span style="color: #268bd2;">"$1"</span>:')
-      .replace(/:\s*"([^"]+)"/g, ': <span style="color: #2aa198;">"$1"</span>')
-      .replace(/:\s*(true|false|null)/g, ': <span style="color: #cb4b16;">$1</span>')
-      .replace(/:\s*([0-9]+(\.[0-9]+)?)/g, ': <span style="color: #d33682;">$1</span>')
+      .replace(/"([^"]+)"\s*:/g, '<span style="color: #0550ae;">"$1"</span>:')
+      .replace(/:\s*"([^"]+)"/g, ': <span style="color: #0a3069;">"$1"</span>')
+      .replace(/:\s*(true|false|null)/g, ': <span style="color: #cf222e;">$1</span>')
+      .replace(/:\s*([0-9]+(\.[0-9]+)?)/g, ': <span style="color: #0550ae;">$1</span>')
   } catch (e) {
     return responseBody.value
   }
@@ -1630,8 +1870,10 @@ const sendRequest = async () => {
   try {
     sending.value = true
 
-    // 发送请求前先自动保存当前的修改
-    // await saveRequest()
+    // 发送请求前自动保存（新请求需要先保存才有ID）
+    if (!selectedRequest.value.id) {
+      await saveRequest()
+    }
 
     // 准备请求体数据
     let bodyData = {}
@@ -1951,6 +2193,85 @@ const copyJsonPathResult = () => {
   }
 }
 
+// 从当前响应中提取所有字段，替换环境变量（自动/手动共用）
+const doAutoExtractToEnv = async (silent = false) => {
+  if (!selectedEnvObj.value) return
+  let json = null
+  try {
+    if (response.value?.response_data?.json) {
+      json = response.value.response_data.json
+    } else if (responseBody.value) {
+      json = JSON.parse(responseBody.value)
+    }
+  } catch (_) {}
+  if (!json || typeof json !== 'object') return
+
+  const newVars = {}
+  const walk = (obj, prefix) => {
+    if (Array.isArray(obj)) {
+      obj.forEach((item, i) => walk(item, prefix + '[' + i + ']'))
+    } else if (obj && typeof obj === 'object') {
+      for (const [k, v] of Object.entries(obj)) {
+        const key = prefix ? prefix + '.' + k : k
+        if (v && typeof v === 'object') { walk(v, key) }
+        else { newVars[key] = v }
+      }
+    }
+  }
+  walk(json, '')
+  if (Object.keys(newVars).length === 0) return
+
+  const updatedVars = { ...newVars }  // 替换而非合并
+  await api.put(`/api-testing/environments/${selectedEnvObj.value.id}/`, {
+    ...selectedEnvObj.value,
+    variables: updatedVars
+  })
+  selectedEnvObj.value.variables = updatedVars
+  const idx = environments.value.findIndex(e => e.id === selectedEnvObj.value.id)
+  if (idx >= 0) environments.value[idx].variables = updatedVars
+  if (!silent) {
+    ElMessage.success(`已替换 ${Object.keys(newVars).length} 个变量: ${Object.keys(newVars).join(', ')}`)
+  }
+}
+
+const saveAllToEnv = async () => {
+  if (!selectedEnvObj.value) { ElMessage.warning('请先选择环境'); return }
+  savingAllToEnv.value = true
+  try { await doAutoExtractToEnv() }
+  catch (e) { ElMessage.error('存入失败: ' + (e.response?.data?.error || e.message)) }
+  finally { savingAllToEnv.value = false }
+}
+
+const saveJsonPathToEnv = async () => {
+  if (!jsonPathVarName.value.trim() || !selectedEnvObj.value) {
+    ElMessage.warning('请输入变量名')
+    return
+  }
+  // 去掉 JSON.stringify 的外层引号（如果是字符串值）
+  let val = jsonPathResult.value
+  try {
+    const parsed = JSON.parse(val)
+    if (typeof parsed === 'string') val = parsed
+  } catch (_) {}
+  savingJsonPathVar.value = true
+  try {
+    const updatedVars = { ...(selectedEnvObj.value.variables || {}), [jsonPathVarName.value.trim()]: val }
+    await api.put(`/api-testing/environments/${selectedEnvObj.value.id}/`, {
+      ...selectedEnvObj.value,
+      variables: updatedVars
+    })
+    selectedEnvObj.value.variables = updatedVars
+    const idx = environments.value.findIndex(e => e.id === selectedEnvObj.value.id)
+    if (idx >= 0) environments.value[idx].variables = updatedVars
+    ElMessage.success(`变量 {{${jsonPathVarName.value.trim()}}} 已存入环境`)
+    jsonPathVarName.value = ''
+  } catch (error) {
+    ElMessage.error('存入失败: ' + (error.response?.data?.error || error.message))
+  } finally {
+    savingJsonPathVar.value = false
+  }
+}
+
 const formatAssertionValue = (value) => {
   if (typeof value === 'object' && value !== null) {
     return JSON.stringify(value, null, 2)
@@ -1988,7 +2309,10 @@ const updateCollection = async () => {
   }
 
   try {
-    await api.put(`/api-testing/collections/${editCollectionForm.id}/`, editCollectionForm)
+    await api.put(`/api-testing/collections/${editCollectionForm.id}/`, {
+      ...editCollectionForm,
+      project: selectedProject.value
+    })
     ElMessage.success('更新成功')
     await loadCollections(selectedProject.value)
     showEditCollectionDialog.value = false
@@ -2728,6 +3052,12 @@ const useLocalVariableCategories = () => {
   padding: 4px 0;
 }
 
+/* 树节点选中高亮 */
+.collection-tree :deep(.el-tree-node.is-current > .el-tree-node__content) {
+  background: #e6f4ff;
+  border-radius: 6px;
+}
+
 .tree-node .el-icon {
   font-size: 16px;
   color: #606266;
@@ -2804,15 +3134,10 @@ const useLocalVariableCategories = () => {
 
 /* 搜索结果 */
 .search-results {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
   background: white;
   border: 1px solid #e4e7ed;
   border-radius: 8px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
-  z-index: 1000;
   max-height: 400px;
   overflow: auto;
   margin-top: 8px;
@@ -3096,18 +3421,50 @@ const useLocalVariableCategories = () => {
 .url-input {
   flex: 1;
   min-width: 200px;
+  max-width: 800px;
 }
 
 .url-input .el-input {
   border-radius: 6px;
 }
 
+/* URL输入框前面的prepend区域，确保环境名称完整显示 */
+.url-input :deep(.el-input-group__prepend) {
+  min-width: 220px;
+  max-width: none;
+  overflow: visible;
+}
+
 .env-select {
-  width: 160px;
+  width: 100%;
+  min-width: 200px;
+}
+
+.env-select :deep(.el-select__selected-item) {
+  max-width: none !important;
+  overflow: visible !important;
+  text-overflow: unset !important;
 }
 
 .env-select .el-select {
   border-radius: 6px;
+}
+
+.env-headers-btn {
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+
+/* 环境配置编辑 */
+.env-kv-list {
+  max-height: 400px;
+  overflow-y: auto;
+}
+.env-kv-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 
 .send-button {
@@ -3219,15 +3576,12 @@ const useLocalVariableCategories = () => {
 
 /* 响应体 */
 .response-body {
-  padding: 24px;
-  min-height: 400px;
-  max-height: 600px;
-  overflow: auto;
-  background: #f8f9fa;
-  border-radius: 10px;
-  margin: 20px;
-  border: 1px solid #e9ecef;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  padding: 8px;
+  min-height: 200px;
+  background: #fafafa;
+  border-radius: 6px;
+  margin: 8px 0;
+  border: 1px solid #e0e0e0;
 }
 
 .response-actions {
@@ -3255,17 +3609,19 @@ const useLocalVariableCategories = () => {
 }
 
 .response-content {
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-  font-size: 14px;
-  line-height: 1.6;
-  color: #303133;
-  background: white;
-  padding: 20px 20px 20px 20px;
-  border-radius: 8px;
-  border: 1px solid #e9ecef;
-  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.05);
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #1a1a2e;
+  background: #fff;
+  padding: 10px 14px;
+  border-radius: 4px;
+  border: 1px solid #e8e8e8;
   white-space: pre-wrap;
-  word-wrap: break-word;
+  word-break: break-all;
+  max-height: 600px;
+  overflow-y: auto;
+  tab-size: 2;
 }
 
 /* 响应头 */
@@ -4270,4 +4626,11 @@ const useLocalVariableCategories = () => {
   color: white !important;
 }
 
+/* 响应体展示 */
+.response-viewer { padding: 8px 4px; }
+.response-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.resp-type-tag { font-size: 12px; background: #e8eaed; color: #5f6368; padding: 2px 10px; border-radius: 4px; font-family: monospace; }
+.resp-schema-tag { font-size: 12px; background: #e6f4ea; color: #137333; padding: 2px 10px; border-radius: 4px; font-weight: 600; }
+.resp-empty { font-size: 13px; color: #9aa0a6; }
+.response-pre { margin: 0; padding: 12px 14px; background: #f8f9fa; border: 1px solid #e8eaed; border-radius: 8px; font-size: 13px; line-height: 1.6; color: #202124; overflow: auto; max-height: 420px; white-space: pre-wrap; word-break: break-all; }
 </style>

@@ -2,16 +2,16 @@
   <div class="layout">
     <el-container>
       <!-- 侧边栏 -->
-      <el-aside width="240px">
-        <div class="logo" @click="router.push('/home')" style="cursor: pointer;">
+      <el-aside width="240px" :class="{ 'api-testing-sidebar': currentModule === 'api-testing' }">
+        <div class="logo" :class="{ 'api-testing-logo': currentModule === 'api-testing' }" @click="router.push('/home')" style="cursor: pointer;">
           <span class="logo-text">TestHub</span>
         </div>
         <el-menu
           :default-active="$route.path"
           router
-          background-color="#001529"
-          text-color="#fff"
-          active-text-color="#1890ff"
+          :background-color="currentModule === 'api-testing' ? '#eaf1ff' : '#001529'"
+          :text-color="currentModule === 'api-testing' ? '#405170' : '#fff'"
+          :active-text-color="currentModule === 'api-testing' ? '#526fae' : '#1890ff'"
         >
           <!-- AI用例生成模块菜单 -->
           <template v-if="currentModule === 'ai-generation'">
@@ -52,45 +52,21 @@
               <el-icon><DataAnalysis /></el-icon>
               <span>{{ $t('menu.testReport') }}</span>
             </el-menu-item>
+            <el-menu-item index="/ai-generation/knowledge-base">
+              <el-icon><Notebook /></el-icon>
+              <span>需求知识库</span>
+            </el-menu-item>
           </template>
 
-          <!-- 接口测试模块菜单 -->
+          <!-- 接口测试模块菜单：只保留设计与执行两个入口 -->
           <template v-else-if="currentModule === 'api-testing'">
-            <el-menu-item index="/api-testing/dashboard">
-              <el-icon><Odometer /></el-icon>
-              <span>{{ $t('menu.dashboard') }}</span>
+            <el-menu-item index="/api-testing/design">
+              <el-icon><Aim /></el-icon>
+              <span>测试设计</span>
             </el-menu-item>
-            <el-menu-item index="/api-testing/projects">
-              <el-icon><Folder /></el-icon>
-              <span>{{ $t('menu.projectManagement') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/api-testing/interfaces">
-              <el-icon><Link /></el-icon>
-              <span>{{ $t('menu.interfaceManagement') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/api-testing/automation">
+            <el-menu-item index="/api-testing/runs">
               <el-icon><VideoPlay /></el-icon>
-              <span>{{ $t('menu.automationTesting') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/api-testing/history">
-              <el-icon><Timer /></el-icon>
-              <span>{{ $t('menu.requestHistory') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/api-testing/environments">
-              <el-icon><Setting /></el-icon>
-              <span>{{ $t('menu.environmentManagement') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/api-testing/reports">
-              <el-icon><DataAnalysis /></el-icon>
-              <span>{{ $t('menu.testReport') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/api-testing/scheduled-tasks">
-              <el-icon><AlarmClock /></el-icon>
-              <span>{{ $t('menu.scheduledTasks') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/api-testing/notification-logs">
-              <el-icon><Bell /></el-icon>
-              <span>{{ $t('menu.notificationList') }}</span>
+              <span>执行与报告</span>
             </el-menu-item>
           </template>
 
@@ -244,6 +220,10 @@
                 <el-icon><Edit /></el-icon>
                 <span>{{ $t('menu.promptConfig') }}</span>
               </el-menu-item>
+              <el-menu-item index="/configuration/api-prompt-config">
+                <el-icon><EditPen /></el-icon>
+                <span>接口测试提示词</span>
+              </el-menu-item>
               <el-menu-item index="/configuration/generation-config">
                 <el-icon><Setting /></el-icon>
                 <span>{{ $t('menu.generationConfig') }}</span>
@@ -276,9 +256,13 @@
       <!-- 主体内容 -->
       <el-container>
         <!-- 顶部导航 -->
-        <el-header height="60px">
+        <el-header height="60px" :class="{ 'api-testing-header': currentModule === 'api-testing' }">
           <div class="header-content">
             <div class="header-left">
+              <el-button v-if="showApiDesignBack" class="design-back" link @click="router.push('/api-testing/design')">
+                <el-icon><ArrowLeft /></el-icon>
+                <span>返回测试设计</span>
+              </el-button>
               <el-breadcrumb separator="/">
                 <el-breadcrumb-item :to="{ path: '/home' }">{{ $t('nav.home') }}</el-breadcrumb-item>
                 <el-breadcrumb-item v-if="moduleName">{{ moduleName }}</el-breadcrumb-item>
@@ -342,7 +326,7 @@ import { useI18n } from 'vue-i18n'
 import {
   Monitor, Folder, Document, Flag, Check, Collection, VideoPlay,
   DataAnalysis, ChatDotRound, DocumentCopy, Link, MagicStick,
-  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Edit, Cpu, ArrowDown, Cellphone, Connection, FolderOpened
+  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Edit, EditPen, Cpu, ArrowDown, ArrowLeft, Cellphone, Connection, FolderOpened
 } from '@element-plus/icons-vue'
 
 
@@ -376,6 +360,12 @@ const currentModule = computed(() => {
   return ''
 })
 
+const showApiDesignBack = computed(() => {
+  return route.path.startsWith('/api-testing/')
+    && route.path !== '/api-testing/design'
+    && route.path !== '/api-testing/runs'
+})
+
 const moduleName = computed(() => {
   const map = {
     'ai-generation': t('modules.aiGeneration'),
@@ -401,17 +391,17 @@ const breadcrumbTitle = computed(() => {
     '/ai-generation/testsuites': t('menu.suiteManagement'),
     '/ai-generation/executions': t('menu.executionRecords'),
     '/ai-generation/reports': t('menu.testReport'),
+    '/ai-generation/knowledge-base': '需求知识库',
 
     // 接口测试
-    '/api-testing/dashboard': t('menu.dashboard'),
-    '/api-testing/projects': t('menu.projectManagement'),
-    '/api-testing/interfaces': t('menu.interfaceManagement'),
-    '/api-testing/automation': t('menu.automationTesting'),
-    '/api-testing/history': t('menu.requestHistory'),
-    '/api-testing/environments': t('menu.environmentManagement'),
-    '/api-testing/reports': t('menu.testReport'),
-    '/api-testing/scheduled-tasks': t('menu.scheduledTasks'),
-    '/api-testing/notification-logs': t('menu.notificationList'),
+    '/api-testing/design': '测试设计',
+    '/api-testing/runs': '执行与报告',
+    '/api-testing/projects': '项目管理',
+    '/api-testing/environments': '环境管理',
+    '/api-testing/scheduled-tasks': '定时任务',
+    '/api-testing/notification-logs': '通知列表',
+    '/api-testing/yapi-sync': 'YApi 连接',
+    '/api-testing/ai-service-config': 'AI 配置',
 
     // UI自动化测试
     '/ui-automation/dashboard': t('menu.dashboard'),
@@ -455,6 +445,7 @@ const breadcrumbTitle = computed(() => {
     // 配置中心
     '/configuration/ai-model': t('menu.aiModelConfig'),
     '/configuration/prompt-config': t('menu.promptConfig'),
+    '/configuration/api-prompt-config': '接口测试提示词配置',
     '/configuration/generation-config': t('menu.generationConfig'),
     '/configuration/ui-env': t('menu.uiEnvConfig'),
     '/configuration/ai-mode': t('menu.aiModeConfig'),
@@ -532,6 +523,42 @@ const handleCommand = (command) => {
       width: 0;
     }
   }
+
+  &.api-testing-sidebar {
+    background:
+      radial-gradient(circle at 18% 2%, rgba(129, 158, 222, .18) 0, transparent 36%),
+      linear-gradient(180deg, #e9f0ff 0%, #f0edff 56%, #eff9f6 100%);
+    border-right: 1px solid #dce4f2;
+    box-shadow: 6px 0 22px rgba(87, 109, 153, .08);
+
+    :deep(.el-menu-item),
+    :deep(.el-sub-menu__title) {
+      margin: 4px 10px;
+      border-radius: 8px;
+    }
+
+    :deep(.el-menu-item:hover),
+    :deep(.el-sub-menu__title:hover) {
+      background: rgba(255, 255, 255, .58) !important;
+      color: #526fae !important;
+    }
+
+    :deep(.el-menu-item.is-active) {
+      background: rgba(255, 255, 255, .78) !important;
+      color: #526fae !important;
+      box-shadow: 0 3px 10px rgba(91, 116, 169, .08);
+    }
+  }
+}
+
+.logo.api-testing-logo {
+  background: transparent;
+  color: #4b5f88;
+  border-bottom-color: #dce4f2;
+
+  .logo-text {
+    color: #4b5f88;
+  }
 }
 
 .el-menu {
@@ -579,7 +606,22 @@ const handleCommand = (command) => {
 
   .header-left {
     flex: 1;
+    min-width: 0;
     overflow: hidden;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+
+    .design-back {
+      flex: none;
+      color: #6f86c9;
+      font-size: 14px;
+      padding: 4px 0;
+    }
+
+    .design-back:hover {
+      color: #4e69b5;
+    }
     
     :deep(.el-breadcrumb) {
       font-size: 14px;
@@ -597,6 +639,32 @@ const handleCommand = (command) => {
       color: #303133;
       font-size: 14px;
     }
+  }
+}
+
+.el-header.api-testing-header {
+  background:
+    radial-gradient(circle at 8% 0%, rgba(143, 170, 228, .14) 0, transparent 28%),
+    linear-gradient(90deg, #f5f8ff 0%, #f8f4ff 58%, #f1fbf7 100%);
+  border-bottom-color: #dde5f2;
+  box-shadow: 0 2px 14px rgba(91, 111, 151, .05);
+
+  :deep(.el-breadcrumb__inner),
+  :deep(.el-breadcrumb__separator) {
+    color: #6c7890;
+  }
+
+  :deep(.el-breadcrumb__inner.is-link:hover) {
+    color: #526fae;
+  }
+
+  .language-selector,
+  .user-info .username {
+    color: #465774;
+  }
+
+  .language-selector:hover {
+    color: #526fae;
   }
 }
 

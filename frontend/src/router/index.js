@@ -9,15 +9,13 @@ import Layout from '@/layout/index.vue'
 import ProjectList from '@/views/projects/ProjectList.vue'
 import Home from '@/views/Home.vue'
 import DataFactory from '@/views/data-factory/DataFactory.vue'
-import ApiDashboard from '@/views/api-testing/Dashboard.vue'
+import ApiTestDesign from '@/views/api-testing/ApiTestDesign.vue'
+import ApiTestRuns from '@/views/api-testing/ApiTestRuns.vue'
 import ApiProjectManagement from '@/views/api-testing/ProjectManagement.vue'
-import ApiInterfaceManagement from '@/views/api-testing/InterfaceManagement.vue'
-import ApiAutomationTesting from '@/views/api-testing/AutomationTesting.vue'
-import ApiRequestHistory from '@/views/api-testing/RequestHistory.vue'
 import ApiEnvironmentManagement from '@/views/api-testing/EnvironmentManagement.vue'
-import ApiReportView from '@/views/api-testing/ReportView.vue'
 import ApiScheduledTasks from '@/views/api-testing/ScheduledTasks.vue'
 import ApiAIServiceConfig from '@/views/api-testing/AIServiceConfig.vue'
+import YApiSync from '@/views/api-testing/YApiSync.vue'
 import NotificationLogs from '@/views/notification/NotificationLogs.vue'
 import UiDashboard from '@/views/ui-automation/dashboard/Dashboard.vue'
 import UiProjectList from '@/views/ui-automation/projects/ProjectList.vue'
@@ -174,6 +172,11 @@ const routes = [
                 component: () => import('@/views/requirement-analysis/TaskDetail.vue')
             },
             {
+                path: 'knowledge-base',
+                name: 'KnowledgeBase',
+                component: () => import('@/views/api-testing/KnowledgeBase.vue')
+            },
+            {
                 path: 'profile',
                 name: 'Profile',
                 component: () => import('@/views/profile/UserProfile.vue')
@@ -187,32 +190,28 @@ const routes = [
         children: [
             {
                 path: '',
-                redirect: 'dashboard'
+                redirect: 'design'
             },
             {
-                path: 'dashboard',
-                name: 'ApiDashboard',
-                component: ApiDashboard
+                path: 'design',
+                name: 'ApiTestDesign',
+                component: ApiTestDesign
             },
+            {
+                path: 'runs',
+                name: 'ApiTestRuns',
+                component: ApiTestRuns
+            },
+            // 配置类页面：不在主菜单展示，由页面右上角“配置”进入
             {
                 path: 'projects',
                 name: 'ApiProjects',
                 component: ApiProjectManagement
             },
             {
-                path: 'interfaces',
-                name: 'ApiInterfaces',
-                component: ApiInterfaceManagement
-            },
-            {
-                path: 'automation',
-                name: 'ApiAutomation',
-                component: ApiAutomationTesting
-            },
-            {
-                path: 'history',
-                name: 'ApiHistory',
-                component: ApiRequestHistory
+                path: 'yapi-sync',
+                name: 'YApiSync',
+                component: YApiSync
             },
             {
                 path: 'environments',
@@ -220,9 +219,9 @@ const routes = [
                 component: ApiEnvironmentManagement
             },
             {
-                path: 'reports',
-                name: 'ApiReports',
-                component: ApiReportView
+                path: 'ai-service-config',
+                name: 'ApiAIServiceConfig',
+                component: ApiAIServiceConfig
             },
             {
                 path: 'scheduled-tasks',
@@ -230,15 +229,19 @@ const routes = [
                 component: ApiScheduledTasks
             },
             {
-                path: 'ai-service-config',
-                name: 'ApiAIServiceConfig',
-                component: ApiAIServiceConfig
-            },
-            {
                 path: 'notification-logs',
                 name: 'ApiNotificationLogs',
                 component: NotificationLogs
-            }
+            },
+            // 旧入口重定向，保持历史链接可用
+            { path: 'dashboard', redirect: '/api-testing/design' },
+            { path: 'interfaces', redirect: '/api-testing/design' },
+            { path: 'automation', redirect: '/api-testing/design' },
+            { path: 'history', redirect: '/api-testing/runs' },
+            { path: 'reports', redirect: '/api-testing/runs' },
+            { path: 'param-analysis', redirect: '/api-testing/design' },
+            { path: 'case-management', redirect: '/api-testing/design' },
+            { path: 'agent', redirect: '/api-testing/design' }
         ]
     },
     {
@@ -387,6 +390,11 @@ const routes = [
                         path: 'prompt-config',
                         name: 'ConfigPromptConfig',
                         component: () => import('@/views/requirement-analysis/PromptConfig.vue')
+                    },
+                    {
+                        path: 'api-prompt-config',
+                        name: 'ConfigApiPromptConfig',
+                        component: () => import('@/views/api-testing/ApiPromptConfig.vue')
                     },
                     {
                         path: 'generation-config',
