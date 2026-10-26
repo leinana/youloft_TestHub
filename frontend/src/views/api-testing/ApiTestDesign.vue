@@ -1458,10 +1458,11 @@ onBeforeUnmount(() => {
 .request-path { color: #98a2b3; font-family: Consolas, monospace; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .add-mark { margin-left: auto; color: #98a2b3; font-size: 12px; }
 .scenario-toolbar { display: flex; align-items: center; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid #eef1f6; flex-wrap: wrap; }
-/* 中间栏较窄时名称框会被按钮组挤到 0 宽，这里给最小宽度并允许按钮组换行 */
-.scenario-name { flex: 1 1 180px; min-width: 150px; max-width: 310px; }
+/* 中间栏很窄（左右面板占掉后约 380px），名称框单独占一行，按钮组换行右对齐，避免互相挤压 */
+.scenario-name { flex: 1 1 100%; max-width: 310px; }
 .scenario-name :deep(.el-input__wrapper) { box-shadow: none; background: #f7f9fc; }
-.toolbar-actions { display: flex; gap: 6px; margin-left: auto; flex: none; flex-wrap: wrap; justify-content: flex-end; }
+.toolbar-actions { display: flex; gap: 6px; margin-left: auto; flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; }
+.toolbar-actions > * { flex: none; }
 .empty-scenario { min-height: 360px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: #667085; padding: 30px; }
 .empty-scenario h3 { color: #273047; margin: 14px 0 6px; }
 .empty-scenario p { margin: 4px 0; font-size: 13px; }
